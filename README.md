@@ -86,4 +86,6 @@ paths — never a leading `/`.
 
 ## Licence
 
-MIT. See `THIRD-PARTY-NOTICES.md` for attribution.
+FSL-1.1-MIT — source-available now, converts to plain MIT two years after each
+release. See `LICENSE` for the full terms and `THIRD-PARTY-NOTICES.md` for
+attribution.

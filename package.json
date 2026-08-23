@@ -1,6 +1,6 @@
 {
   "name": "kaya-editor",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local browser review surface for agent-written artifacts. Annotate, send feedback, no upload.",
   "type": "module",
   "bin": {
@@ -21,7 +21,7 @@
   "scripts": {
     "test": "vitest run test"
   },
-  "license": "MIT",
+  "license": "FSL-1.1-MIT",
   "keywords": [
     "review",
     "annotate",
