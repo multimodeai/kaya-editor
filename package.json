@@ -1,0 +1,39 @@
+{
+  "name": "kaya-editor",
+  "version": "0.1.0",
+  "description": "Local browser review surface for agent-written artifacts. Annotate, send feedback, no upload.",
+  "type": "module",
+  "bin": {
+    "kaya": "./bin/kaya.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "bin",
+    "src",
+    "vendor",
+    ".nvmrc",
+    "README.md",
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md"
+  ],
+  "scripts": {
+    "test": "vitest run test"
+  },
+  "license": "MIT",
+  "keywords": [
+    "review",
+    "annotate",
+    "artifact",
+    "agent",
+    "html",
+    "markdown",
+    "local",
+    "feedback",
+    "llm"
+  ],
+  "devDependencies": {
+    "vitest": "^4.0.18"
+  }
+}

@@ -1,0 +1,671 @@
+import { KAYA_PREFIX, OVERLAY_STYLE } from './constants.js';
+
+export const OVERLAY_SCRIPT = `
+(() => {
+  const base = '${KAYA_PREFIX}';
+  const html = document.documentElement;
+  const state = { annotate:false, queued:[], ended:false, lastReply:'', suppressClick:false, ctx:null, ref:null };
+  const clientId = 'c' + Math.random().toString(36).slice(2, 12);
+
+  // Staged annotations live in sessionStorage so a reload - deliberate, accidental,
+  // or a browser crash - never silently destroys work the user has already typed.
+  // Keyed per reviewed file, not per origin: ports are recycled across sessions, so
+  // an origin-only key can restore one file's notes onto a different artifact.
+  // sessionStorage also clears when the tab closes, the right lifetime for unsent notes.
+  const STAGE_KEY='kaya:staged:' + '__KAYA_SESSION_KEY__';
+  function saveStage(){
+    try{ sessionStorage.setItem(STAGE_KEY, JSON.stringify({ queued: state.queued, draft: composerInput ? composerInput.value : '' })); }
+    catch(_e){ /* private mode / quota - staging is best-effort, never block the UI */ }
+  }
+  function loadStage(){
+    try{
+      const raw=sessionStorage.getItem(STAGE_KEY); if(!raw) return null;
+      const v=JSON.parse(raw); return v && Array.isArray(v.queued) ? v : null;
+    }catch(_e){ return null; }
+  }
+  function clearStage(){ try{ sessionStorage.removeItem(STAGE_KEY); }catch(_e){} }
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+  function clip(s,n){ s=String(s==null?'':s).replace(/\\s+/g,' ').trim(); return s.length>n ? s.slice(0,n)+'\\u2026' : s; }
+
+  const root = document.createElement('div'); root.id='kaya-overlay';
+
+  const nav = document.createElement('header'); nav.id='kaya-nav'; nav.setAttribute('aria-label','Multimode Kaya Editor review');
+  nav.innerHTML = '<div class="kaya-brandwrap"><span class="kaya-brand">Kaya</span><span class="kaya-brand-sub">Editor</span></div>'
+    + '<div class="kaya-nav-right">'
+    + '<button class="kaya-overflowbtn" data-overflow style="display:none">0 layout issues</button>'
+    + '<label class="kaya-toggle"><input type="checkbox" data-kaya-annotate><span class="kaya-switch"></span>Annotate</label>'
+    + '<div class="kaya-reviewswrap" data-reviews-wrap style="display:none"><button class="kaya-reviewsbtn" data-reviews-btn>Reviews</button><div class="kaya-reviews" data-reviews></div></div>'
+    + '<div class="kaya-menuwrap"><button class="kaya-menubtn" data-menu-btn aria-label="Menu">\\u22ee</button>'
+    + '<div class="kaya-menu" data-menu>'
+    + '<div class="kaya-menu-file" data-menu-file>artifact</div>'
+    + '<button class="kaya-menu-item" data-menu-reload>Reload artifact</button>'
+    + '<button class="kaya-menu-item" data-menu-copy>Copy file path</button>'
+    + '<button class="kaya-menu-item" data-menu-export>Export standalone HTML</button>'
+    + '<button class="kaya-menu-item kaya-menu-danger" data-menu-end>End session</button>'
+    + '</div></div></div>';
+
+  const hl = document.createElement('div'); hl.id='kaya-hl';
+
+  const pop = document.createElement('div'); pop.id='kaya-pop';
+  pop.innerHTML = '<div class="kaya-pop-head" data-pop-head></div>'
+    + '<textarea data-pop-input placeholder="Tell the agent what to change here..."></textarea>'
+    + '<div class="kaya-pop-hint">Enter to queue \\u00b7 \\u2318 + Enter to send now</div>'
+    + '<div class="kaya-pop-actions"><button class="kaya-pop-cancel" data-pop-cancel>Cancel</button><button class="kaya-pop-queue" data-kaya-queue data-pop-queue>Queue</button></div>';
+
+  const convo = document.createElement('aside'); convo.id='kaya-convo';
+  convo.innerHTML = '<div class="kaya-convo-head"><span class="kaya-convo-title">Conversation</span><span class="kaya-count" data-count>0</span></div>'
+    + '<div class="kaya-log" data-log data-kaya-reply></div>'
+    + '<div class="kaya-pending" data-pending></div>'
+    + '<div class="kaya-otherbanner" data-otherbanner>This review is open in another tab. <button data-takeover>Take over here</button></div>'
+    + '<div class="kaya-composer"><textarea data-input placeholder="Write a message for the agent..."></textarea>'
+    + '<div class="kaya-send-row"><button class="kaya-btn-primary" data-send>Send to Agent</button><button class="kaya-btn-ghost" data-end>Send &amp; End</button></div></div>';
+
+  root.appendChild(nav); root.appendChild(hl); root.appendChild(pop); root.appendChild(convo);
+  html.appendChild(root);
+
+  const q = function(sel,r){ return (r||convo).querySelector(sel); };
+  const logEl = q('[data-log]'); const composerInput = q('[data-input]'); const pendingEl = q('[data-pending]'); const countEl = q('[data-count]');
+  const annBox = nav.querySelector('[data-kaya-annotate]');
+  const overflowBtn = nav.querySelector('[data-overflow]');
+  if(overflowBtn) overflowBtn.addEventListener('click', cycleOverflow);
+  const popHead = pop.querySelector('[data-pop-head]'); const popInput = pop.querySelector('[data-pop-input]');
+
+  function layout(){
+    const bottom = window.innerWidth < 980;
+    convo.classList.toggle('kaya-dock-bottom', bottom);
+    convo.classList.toggle('kaya-dock-right', !bottom);
+    html.style.paddingTop = '52px';
+    if(bottom){ html.style.paddingRight=''; html.style.paddingBottom='44vh'; }
+    else { html.style.paddingBottom=''; html.style.paddingRight='400px'; }
+  }
+  layout(); window.addEventListener('resize', layout);
+
+  function isOurs(el){ return !el || root.contains(el); }
+  function isNative(el){ return el && el.closest && el.closest('a,button,input,select,textarea,label,summary,[contenteditable],[data-kaya-action]'); }
+  function isSvg(el){ return !!(el && el.ownerSVGElement !== undefined && el.namespaceURI==='http://www.w3.org/2000/svg'); }
+  function selectorFor(element){
+    if(!element || element===document.body || element===html) return 'body';
+    // An id inside a diagram is the most stable anchor available (Mermaid emits
+    // e.g. flowchart-Decision-3), so short-circuit on it.
+    if(element.id){ try{ return '#'+CSS.escape(element.id); }catch(_e){} }
+    const parts=[]; let cur=element;
+    while(cur && cur.nodeType===1 && cur!==document.body && parts.length<5){
+      // SVG tagName preserves case (linearGradient, clipPath) - lowercasing it
+      // produces a selector that matches nothing.
+      let part = isSvg(cur) ? cur.tagName : cur.tagName.toLowerCase();
+      if(cur.id) part+='#'+CSS.escape(cur.id);
+      // className on SVG is an SVGAnimatedString, never a string: use classList.
+      else if(cur.classList && cur.classList.length) part+='.'+Array.from(cur.classList).slice(0,2).map(function(c){return CSS.escape(c);}).join('.');
+      parts.unshift(part); cur=cur.parentElement;
+    }
+    let sel = parts.join(' > ')||'body';
+    // Count matches in the ARTIFACT only. Kaya's own chrome is full of generic
+    // divs, and counting those made the uniqueness check bail on selectors that
+    // were in fact unique within the document being reviewed.
+    const countIn = function(q){
+      try{ return Array.prototype.filter.call(document.querySelectorAll(q), function(n){ return !isOurs(n); }).length; }
+      catch(_e){ return -1; }
+    };
+    // A selector that matches more than one element is worse than useless: the
+    // agent cannot tell which element was meant, and anchor validation resolves
+    // the wrong node and reports a fresh note as stale. Disambiguate with
+    // nth-of-type, walking outward until the selector resolves uniquely.
+    try{
+      if(countIn(sel) !== 1){
+        const chain=[]; let node=element;
+        while(node && node.nodeType===1 && node!==document.body && chain.length<6){
+          const tag = isSvg(node) ? node.tagName : node.tagName.toLowerCase();
+          let piece = tag;
+          if(node.id){ chain.unshift('#'+CSS.escape(node.id)); break; }
+          const parent=node.parentElement;
+          if(parent){
+            const sibs=Array.from(parent.children).filter(function(c){
+              return (isSvg(c)?c.tagName:c.tagName.toLowerCase())===tag;
+            });
+            if(sibs.length>1) piece += ':nth-of-type('+(sibs.indexOf(node)+1)+')';
+          }
+          chain.unshift(piece);
+          node=parent;
+        }
+        const exact=chain.join(' > ');
+        if(exact && countIn(exact)===1) sel=exact;
+      }
+    }catch(_e){ /* selector probing is best-effort; fall back to the simple form */ }
+    return sel;
+  }
+  // Inside a diagram, resolve to a meaningful node - one with an id, or a <g> -
+  // rather than a raw <path> the user cannot identify.
+  function svgTarget(el){
+    let cur=el;
+    while(cur && isSvg(cur)){
+      if(cur.id || cur.tagName==='g') return cur;
+      cur=cur.parentElement;
+    }
+    return el && el.closest ? (el.closest('svg') || el) : el;
+  }
+  function refFor(el){
+    const t=clip(el.textContent, 70);
+    if(t) return t;
+    if(el.id) return el.id;
+    return 'the '+(isSvg(el)?el.tagName:el.tagName.toLowerCase())+' element';
+  }
+  function placeHl(rect, lock){ hl.style.display='block'; hl.style.left=rect.left+'px'; hl.style.top=rect.top+'px'; hl.style.width=rect.width+'px'; hl.style.height=rect.height+'px'; hl.classList.toggle('kaya-lock', !!lock); }
+  // A box around one section is useful; a box that spans every section (a
+  // page-level wrapper, <body>, or an element as tall as the whole document) is
+  // just noise. Treat those as "not a target" so we never highlight the whole page.
+  function coversPage(el, rect){
+    if(el===document.body || el===document.documentElement) return true;
+    const pageH=Math.max(document.documentElement.scrollHeight, window.innerHeight);
+    return rect.height >= pageH*0.85;
+  }
+  function hideHl(){ hl.style.display='none'; hl.classList.remove('kaya-lock'); }
+
+  annBox.addEventListener('change', function(){ state.annotate=annBox.checked; try{ syncLbMode(); }catch(_e){} html.classList.toggle('kaya-annotate', state.annotate); if(!state.annotate){ hideHl(); closePop(); } });
+
+  document.addEventListener('mousemove', function(e){
+    if(!state.annotate || pop.classList.contains('kaya-show')) return;
+    const el=isSvg(e.target)?svgTarget(e.target):e.target;
+    if(isOurs(el) || !el || el.nodeType!==1){ hideHl(); return; }
+    const r=el.getBoundingClientRect();
+    if(coversPage(el, r)){ hideHl(); return; }
+    placeHl(r, false);
+  }, true);
+
+  document.addEventListener('mouseup', function(){
+    if(!state.annotate) return;
+    setTimeout(function(){
+      const sel=window.getSelection && window.getSelection();
+      const text=sel ? sel.toString().trim() : '';
+      if(!text || !sel.rangeCount) return;
+      const anchor=sel.anchorNode && (sel.anchorNode.nodeType===1 ? sel.anchorNode : sel.anchorNode.parentElement);
+      if(isOurs(anchor)) return;
+      state.suppressClick=true; setTimeout(function(){ state.suppressClick=false; }, 350);
+      try { const r=sel.getRangeAt(0).getBoundingClientRect(); placeHl(r, true); openPop(r.left, r.bottom, '\\u201c'+clip(text,80)+'\\u201d', { selector:selectorFor(anchor), selectedText:text }); } catch(_e){}
+    }, 0);
+  }, true);
+
+  document.addEventListener('click', function(e){
+    if(!state.annotate || isOurs(e.target)) return;
+    if(state.suppressClick){ state.suppressClick=false; return; }
+    if(isNative(e.target)) return;
+    const el=isSvg(e.target)?svgTarget(e.target):e.target; const r=el.getBoundingClientRect();
+    if(coversPage(el, r)) return;  // never annotate the whole page - let the click pass through
+    e.preventDefault(); e.stopPropagation();
+    placeHl(r, true);
+    openPop(e.clientX, e.clientY, refFor(el), { selector:selectorFor(el), anchorText:anchorTextOf(el) });
+  }, true);
+
+  function openPop(x, y, ref, ctx){
+    state.ctx=ctx; state.ref=ref;
+    popHead.innerHTML='Annotate <b>'+esc(ref)+'</b>';
+    popInput.value='';
+    pop.classList.add('kaya-show');
+    const pw=pop.offsetWidth||322, ph=pop.offsetHeight||190;
+    let px=Math.min(x, window.innerWidth-pw-12); px=Math.max(12, px);
+    let py=Math.min(y+10, window.innerHeight-ph-12); py=Math.max(60, py);
+    pop.style.left=px+'px'; pop.style.top=py+'px';
+    popInput.focus();
+  }
+  function closePop(){ pop.classList.remove('kaya-show'); state.ctx=null; state.ref=null; hideHl(); }
+  pop.querySelector('[data-pop-cancel]').addEventListener('click', closePop);
+  pop.querySelector('[data-pop-queue]').addEventListener('click', function(){ queueFromPop(false); });
+  popInput.addEventListener('keydown', function(e){
+    if(e.key==='Enter' && (e.metaKey||e.ctrlKey)){ e.preventDefault(); queueFromPop(true); }
+    else if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); queueFromPop(false); }
+    else if(e.key==='Escape'){ e.preventDefault(); closePop(); }
+  });
+  function queueFromPop(sendNow){
+    const note=popInput.value.trim(); if(!note) return;
+    const ctx=state.ctx||{};
+    addQueued({ ref:state.ref, note:note, display:note, agentText:note, selector:ctx.selector, selectedText:ctx.selectedText,
+                anchorText:ctx.anchorText||null, anchorHash:ctx.anchorText?hashText(ctx.anchorText):null, anchorState:'ok' });
+    closePop();
+    if(sendNow) send();
+  }
+
+  // ---- self-validating anchors ----
+  // A note anchored to a selector silently becomes a lie when the agent rewrites
+  // the artifact. Rather than versioning the document (a core rewrite), each note
+  // carries a fingerprint of what it was attached to and re-checks itself.
+  function anchorTextOf(el){ return clip(el && el.textContent, 120); }
+  function hashText(t){
+    const s=String(t==null?'':t); let h=0;
+    for(let i=0;i<s.length;i++){ h=(Math.imul(31,h)+s.charCodeAt(i))|0; }
+    return (h>>>0).toString(36);
+  }
+  // Deepest element whose text contains the anchor. Returns null when absent or
+  // ambiguous - a note we cannot place unambiguously is stale, never guessed.
+  function findByAnchorText(text){
+    if(!text) return null;
+    const all=document.body ? document.body.querySelectorAll('*') : [];
+    const hits=[];
+    for(let i=0;i<all.length;i++){
+      const el=all[i];
+      if(isOurs(el)) continue;
+      if(clip(el.textContent,400).indexOf(text)!==-1){
+        // keep only the deepest: drop any ancestor already collected
+        for(let k=hits.length-1;k>=0;k--){ if(hits[k].contains(el)) hits.splice(k,1); }
+        hits.push(el);
+      }
+    }
+    return hits.length===1 ? hits[0] : null;
+  }
+  function validateAnchors(){
+    let changed=false;
+    for(let i=0;i<state.queued.length;i++){
+      const it=state.queued[i];
+      if(!it.anchorHash){ if(it.anchorState!=='ok'){ it.anchorState='ok'; changed=true; } continue; }
+      let next='stale';
+      let el=null;
+      try{ el = it.selector ? document.querySelector(it.selector) : null; }catch(_e){ el=null; }
+      if(el && !isOurs(el)){
+        next = hashText(anchorTextOf(el))===it.anchorHash ? 'ok' : 'stale';
+      } else {
+        const moved=findByAnchorText(it.anchorText);
+        if(moved){ it.selector=selectorFor(moved); next='moved'; }
+      }
+      if(it.anchorState!==next){ it.anchorState=next; changed=true; }
+    }
+    if(changed) renderPending();
+  }
+
+  function addQueued(item){ state.queued.push(item); renderPending(); }
+  function renderPending(){
+    saveStage();
+    countEl.textContent=String(state.queued.length);
+    countEl.classList.toggle('kaya-on', state.queued.length>0);
+    pendingEl.innerHTML=state.queued.map(function(it,i){
+      const st = it.anchorState||'ok';
+      const badge = st==='stale' ? '<span class="kaya-pi-badge kaya-stale">anchor lost</span>'
+                  : st==='moved' ? '<span class="kaya-pi-badge kaya-moved">re-anchored</span>' : '';
+      const ref = it.ref ? '<div class="kaya-pi-ref">'+esc(it.ref)+badge+'</div>' : badge;
+      return '<div class="kaya-pitem"><div class="kaya-pi-body">'+ref+'<div class="kaya-pi-note">'+esc(it.display||it.note||'')+'</div></div><span class="kaya-pi-x" data-i="'+i+'">\\u00d7</span></div>';
+    }).join('');
+  }
+  pendingEl.addEventListener('click', function(e){ const i=e.target && e.target.getAttribute && e.target.getAttribute('data-i'); if(i!=null){ state.queued.splice(Number(i),1); renderPending(); } });
+
+  let historyKey='';
+  function renderHistory(hist){
+    const key=hist.length+':'+(hist.length?(hist[hist.length-1].text||'').length:0);
+    if(key===historyKey) return; historyKey=key;
+    if(!hist.length){ logEl.innerHTML='<div class="kaya-empty">No messages yet.<br>Flip on <b>Annotate</b>, click a box or select some text, add a note, then <b>Send to Agent</b>.</div>'; return; }
+    let round=0, out='';
+    for(let k=0;k<hist.length;k++){ const m=hist[k];
+      if(m.role==='agent'){ round++; out+='<div class="kaya-msg agent"><span class="kaya-who">Agent <span class="kaya-round">Round '+round+'</span></span>'+esc(m.text)+'</div>'; }
+      else { out+='<div class="kaya-msg you"><span class="kaya-who">You</span>'+(m.ref?'<span class="kaya-ref">'+esc(m.ref)+'</span>':'')+esc(m.text)+'</div>'; }
+    }
+    logEl.innerHTML=out; logEl.scrollTop=logEl.scrollHeight;
+  }
+
+  async function send(){
+    const msg=composerInput.value.trim();
+    if(msg){ state.queued.push({ ref:null, note:msg, display:msg, agentText:msg }); composerInput.value=''; }
+    const items=state.queued.splice(0); renderPending();
+    for(let k=0;k<items.length;k++){ const it=items[k];
+      // A stale anchor means the location reference cannot be trusted: say so
+      // rather than let the agent act on a pointer that no longer resolves.
+      const outText = it.anchorState==='stale' ? '[stale] '+it.agentText : it.agentText;
+      try{ await fetch(base+'/feedback',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({ text: outText, tag:'comment', selector: it.selector, selectedText: it.selectedText, ref: it.ref||null })}); }
+      catch(_e){ state.queued.unshift(it); renderPending(); return; }
+    }
+    clearStage();
+    if(state.needsReload){ state.needsReload=false; state.leaving=true; location.reload(); return; }
+    refresh();
+  }
+  // Restore anything staged before the last reload, and keep the composer draft too.
+  (function restoreStage(){
+    const v=loadStage(); if(!v) return;
+    if(v.queued.length){ state.queued=v.queued; renderPending(); validateAnchors(); }
+    if(v.draft && composerInput && !composerInput.value){ composerInput.value=v.draft; }
+  })();
+  if(composerInput){ composerInput.addEventListener('input', saveStage); }
+  // Last-resort guard: warn before leaving with unsent notes still staged.
+  window.addEventListener('beforeunload', function(e){
+    if(!state.queued.length || state.leaving) return;
+    e.preventDefault(); e.returnValue=''; return '';
+  });
+
+  const sendBtn=q('[data-send]'); const endBtn=q('[data-end]');
+  // Once the review is ended (Send & End, or ended elsewhere) the agent stops
+  // polling, so anything typed here would queue with nobody listening. Reflect
+  // that: disable the composer and say how to continue.
+  function applyEnded(){
+    const e=state.ended;
+    composerInput.disabled=e; sendBtn.disabled=e; endBtn.disabled=e;
+    composerInput.placeholder = e ? 'Review ended - run kaya again to reopen and continue.' : 'Write a message for the agent...';
+    convo.classList.toggle('kaya-ended', e);
+  }
+  sendBtn.addEventListener('click', function(){ send(); });
+  endBtn.addEventListener('click', async function(){ await send(); try{ await fetch(base+'/end?by=user',{method:'POST'}); state.ended=true; applyEnded(); refresh(); }catch(_e){} });
+  composerInput.addEventListener('keydown', function(e){ if(e.key==='Enter' && (e.metaKey||e.ctrlKey)){ e.preventDefault(); send(); } });
+
+  // ---- navbar overflow menu ----
+  const menu = nav.querySelector('[data-menu]');
+  const menuWrap = nav.querySelector('.kaya-menuwrap');
+  const menuFileEl = nav.querySelector('[data-menu-file]');
+  let filePath = '';
+  fetch(base+'/health').then(function(r){ return r.json(); }).then(function(d){ filePath=d.file||''; if(menuFileEl) menuFileEl.textContent = (filePath.split('/').pop()) || 'artifact'; }).catch(function(){});
+  function closeMenu(){ menu.classList.remove('kaya-open'); }
+  nav.querySelector('[data-menu-btn]').addEventListener('click', function(){ menu.classList.toggle('kaya-open'); });
+  document.addEventListener('mousedown', function(e){ if(!menuWrap.contains(e.target)) closeMenu(); }, true);
+  nav.querySelector('[data-menu-reload]').addEventListener('click', function(){ closeMenu(); state.leaving=true; window.location.reload(); });
+  nav.querySelector('[data-menu-copy]').addEventListener('click', function(){ closeMenu(); if(navigator.clipboard && filePath) navigator.clipboard.writeText(filePath); });
+  nav.querySelector('[data-menu-export]').addEventListener('click', function(){ closeMenu(); const a=document.createElement('a'); a.href=base+'/export'; a.download=''; document.body.appendChild(a); a.click(); a.remove(); });
+  nav.querySelector('[data-menu-end]').addEventListener('click', async function(){ closeMenu(); try{ await fetch(base+'/end?by=user',{method:'POST'}); state.ended=true; applyEnded(); refresh(); }catch(_e){} });
+
+  // ---- reviews switcher: shows every open Kaya session so you can see what is
+  // latest and jump between them (server aggregates them, no cross-port CORS) ----
+  const reviewsWrap = nav.querySelector('[data-reviews-wrap]');
+  const reviewsBtn = nav.querySelector('[data-reviews-btn]');
+  const reviewsEl = nav.querySelector('[data-reviews]');
+  function relTimeUI(ms){ const s=Math.round(ms/1000); if(s<10)return'just now'; if(s<60)return s+'s ago'; const m=Math.round(s/60); if(m<60)return m+'m ago'; return Math.round(m/60)+'h ago'; }
+  async function refreshReviews(){
+    try{
+      const r=await fetch(base+'/sessions'); if(!r.ok) return; const d=await r.json();
+      const sessions=(d.sessions)||[];
+      if(sessions.length<=1){ reviewsWrap.style.display='none'; reviewsEl.classList.remove('kaya-open'); return; }
+      reviewsWrap.style.display='inline-flex';
+      reviewsBtn.textContent='Reviews ('+sessions.length+')';
+      const now=Date.now();
+      reviewsEl.innerHTML=sessions.map(function(s){
+        const cur=s.self?' kaya-rev-current':'';
+        const tags=(s.self?'<span class="kaya-rev-you">this tab</span>':'')+(s.ended?'<span class="kaya-rev-ended">ended</span>':'');
+        const meta=s.historyLen+' msg'+(s.historyLen===1?'':'s')+' \\u00b7 '+relTimeUI(now-(s.lastActivity||now));
+        return '<button class="kaya-rev-item'+cur+'" data-rev-url="'+esc(s.url)+'"><span class="kaya-rev-name">'+esc(s.name)+tags+'</span><span class="kaya-rev-meta">'+esc(meta)+'</span></button>';
+      }).join('');
+    }catch(_e){}
+  }
+  reviewsBtn.addEventListener('click', function(){ reviewsEl.classList.toggle('kaya-open'); refreshReviews(); });
+  reviewsEl.addEventListener('click', function(e){ const b=e.target.closest && e.target.closest('[data-rev-url]'); if(!b) return; reviewsEl.classList.remove('kaya-open'); if(b.classList.contains('kaya-rev-current')) return; const u=b.getAttribute('data-rev-url'); if(u) window.open(u, u); });
+  document.addEventListener('mousedown', function(e){ if(reviewsWrap && !reviewsWrap.contains(e.target)) reviewsEl.classList.remove('kaya-open'); }, true);
+  refreshReviews(); window.setInterval(refreshReviews, 4000);
+
+  // ---- multi-tab awareness ----
+  const bannerEl = q('[data-otherbanner]');
+  bannerEl.querySelector('[data-takeover]').addEventListener('click', function(){ fetch(base+'/claim?client='+clientId,{method:'POST'}).catch(function(){}); bannerEl.classList.remove('kaya-show'); });
+
+  // ---- declarative asks ----
+  // The agent DECLARES a question in the artifact markup; the overlay renders the
+  // control and owns the answer shape. That is what makes the answer genuinely
+  // typed - the agent never hand-writes the widget, so it cannot drift.
+  //   <div data-kaya-ask="segment"
+  //        data-kaya-label="Which segment first?"
+  //        data-kaya-options="clinics|csu-labs|legal"></div>
+  // Inert by construction: a document with no [data-kaya-ask] behaves exactly as
+  // it did before this existed.
+  function askText(id, value){ return '[ask] ' + id + ' = ' + value; }
+  function answerAsk(id, value, label){
+    // One answer per question: choosing again replaces the staged answer rather
+    // than queueing a contradictory second one.
+    for(let i=state.queued.length-1;i>=0;i--){
+      if(state.queued[i].askId===id) state.queued.splice(i,1);
+    }
+    addQueued({ ref: label||id, note: askText(id,value), display: (label||id)+': '+value,
+                agentText: askText(id,value), selector:'[data-kaya-ask="'+id+'"]',
+                selectedText:null, askId:id });
+  }
+  function hydrateAsks(){
+    const nodes=document.querySelectorAll('[data-kaya-ask]');
+    for(let i=0;i<nodes.length;i++){
+      const el=nodes[i];
+      if(el.getAttribute('data-kaya-hydrated')==='1') continue;
+      const id=el.getAttribute('data-kaya-ask');
+      const raw=el.getAttribute('data-kaya-options')||'';
+      const opts=raw.split('|').map(function(o){return o.trim();}).filter(Boolean);
+      if(!id || !opts.length) continue;
+      const label=el.getAttribute('data-kaya-label')||'';
+      el.setAttribute('data-kaya-hydrated','1');
+      const wrap=document.createElement('div'); wrap.className='kaya-ask';
+      if(label){ const l=document.createElement('div'); l.className='kaya-ask-label'; l.textContent=label; wrap.appendChild(l); }
+      const row=document.createElement('div'); row.className='kaya-ask-row';
+      opts.forEach(function(opt){
+        const b=document.createElement('button');
+        b.type='button'; b.className='kaya-ask-opt'; b.textContent=opt;
+        b.setAttribute('data-kaya-action','ask');
+        b.addEventListener('click', function(){
+          row.querySelectorAll('.kaya-ask-opt').forEach(function(x){ x.classList.remove('kaya-on'); });
+          b.classList.add('kaya-on');
+          answerAsk(id, opt, label);
+        });
+        row.appendChild(b);
+      });
+      wrap.appendChild(row); el.appendChild(wrap);
+    }
+  }
+  hydrateAsks();
+  validateAnchors();
+  let ofT=null;
+  function scheduleOverflow(){ clearTimeout(ofT); ofT=setTimeout(checkOverflow, 250); }
+  scheduleOverflow(); window.addEventListener('resize', scheduleOverflow);
+
+  // ---- overflow check (Feature A) ----
+  // A container that scrolls sideways ON PURPOSE is correct, not a defect - wide
+  // tables and code blocks are supposed to live in their own overflow-x box.
+  // The real defect is the PAGE scrolling sideways, so that is what we test.
+  let overflowHits=[], overflowIdx=0;
+  function scrollableAncestor(el){
+    let cur=el && el.parentElement;
+    while(cur && cur!==document.body && cur!==html){
+      const ox=getComputedStyle(cur).overflowX;
+      if(ox==='auto'||ox==='scroll') return cur;
+      cur=cur.parentElement;
+    }
+    return null;
+  }
+  function checkOverflow(){
+    overflowHits=[];
+    const pageOverflows = html.scrollWidth > window.innerWidth + 1;
+    if(pageOverflows){
+      const vw=window.innerWidth;
+      const all=document.body?document.body.querySelectorAll('*'):[];
+      for(let i=0;i<all.length;i++){
+        const el=all[i];
+        if(isOurs(el)) continue;
+        if(scrollableAncestor(el)) continue;          // deliberately contained
+        const ox=getComputedStyle(el).overflowX;
+        if(ox==='auto'||ox==='scroll') continue;      // scrolls on purpose
+        const r=el.getBoundingClientRect();
+        if(r.width>0 && r.right > vw + 1) overflowHits.push(el);
+      }
+      // keep the outermost offenders only; children inherit the parent's overflow
+      overflowHits=overflowHits.filter(function(el){
+        return !overflowHits.some(function(o){ return o!==el && o.contains(el); });
+      });
+    }
+    renderOverflow();
+  }
+  function renderOverflow(){
+    const n = overflowHits.length || 0;
+    if(!overflowBtn) return;
+    overflowBtn.style.display = n ? '' : 'none';
+    overflowBtn.textContent = n===1 ? '1 layout issue' : n+' layout issues';
+  }
+  function cycleOverflow(){
+    if(!overflowHits.length) return;
+    const el=overflowHits[overflowIdx % overflowHits.length]; overflowIdx++;
+    el.scrollIntoView({ block:'center', behavior: reduceMotion()?'auto':'smooth' });
+    placeHl(el.getBoundingClientRect(), true);
+    setTimeout(function(){ placeHl(el.getBoundingClientRect(), true); }, 320);
+  }
+  function reduceMotion(){ try{ return matchMedia('(prefers-reduced-motion: reduce)').matches; }catch(_e){ return false; } }
+
+  // ---- zoom lightbox (Feature B) ----
+  // A hover affordance, never a plain click: zoom must not compete with annotate.
+  const ZOOM_SEL='img, svg, .mermaid, [data-kaya-zoom]';
+  const lb=document.createElement('div'); lb.id='kaya-lightbox';
+  lb.innerHTML='<button class="kaya-lb-close" data-lb-close aria-label="Close">\u00d7</button><div class="kaya-lb-stage" data-lb-stage></div>';
+  const zoomBtn=document.createElement('button');
+  zoomBtn.id='kaya-zoombtn'; zoomBtn.type='button'; zoomBtn.textContent='Zoom';
+  zoomBtn.setAttribute('data-kaya-action','zoom');
+  let zoomTarget=null, lbSource=null;
+  let lbScale=1, lbX=0, lbY=0, dragging=false, dragSX=0, dragSY=0;
+
+  function showZoomBtn(el){
+    zoomTarget=el;
+    const r=el.getBoundingClientRect();
+    if(r.width<48 || r.height<48){ hideZoomBtn(); return; }
+    zoomBtn.style.display='block';
+    zoomBtn.style.left=Math.min(r.right-64, window.innerWidth-72)+'px';
+    zoomBtn.style.top=Math.max(r.top+8, 60)+'px';
+  }
+  function hideZoomBtn(){ zoomBtn.style.display='none'; zoomTarget=null; }
+  function applyLb(){
+    const stage=lb.querySelector('[data-lb-stage]');
+    stage.style.transform='translate('+lbX+'px,'+lbY+'px) scale('+lbScale+')';
+  }
+  function syncLbMode(){ lb.classList.toggle('kaya-annotating', !!state.annotate); }
+  function openLb(el){
+    lbSource=el;
+    syncLbMode();
+    const stage=lb.querySelector('[data-lb-stage]');
+    // Clone: the artifact DOM is never moved or mutated.
+    stage.innerHTML='';
+    stage.appendChild(el.cloneNode(true));
+    lbScale=1; lbX=0; lbY=0; applyLb();
+    lb.classList.add('kaya-show');
+    html.style.overflow='hidden';
+  }
+  function closeLb(){
+    lbSource=null;
+    lb.classList.remove('kaya-show');
+    lb.querySelector('[data-lb-stage]').innerHTML='';
+    html.style.overflow='';
+  }
+  lb.addEventListener('click', function(e){ if(e.target===lb || e.target.hasAttribute('data-lb-close')) closeLb(); });
+  lb.addEventListener('wheel', function(e){
+    if(!lb.classList.contains('kaya-show')) return;
+    e.preventDefault();
+    const prev=lbScale;
+    lbScale=Math.min(8, Math.max(0.25, lbScale * (e.deltaY<0?1.12:0.89)));
+    // zoom about the cursor
+    const cx=e.clientX-window.innerWidth/2, cy=e.clientY-window.innerHeight/2;
+    lbX-=cx*(lbScale/prev-1); lbY-=cy*(lbScale/prev-1);
+    applyLb();
+  }, { passive:false });
+  lb.addEventListener('mousedown', function(e){
+    if(state.annotate) return;            // annotate mode: clicks select, never pan
+    if(e.target.hasAttribute('data-lb-close')) return;
+    dragging=true; dragSX=e.clientX-lbX; dragSY=e.clientY-lbY; lb.classList.add('kaya-grabbing');
+  });
+  window.addEventListener('mousemove', function(e){ if(!dragging) return; lbX=e.clientX-dragSX; lbY=e.clientY-dragSY; applyLb(); });
+  window.addEventListener('mouseup', function(){ dragging=false; lb.classList.remove('kaya-grabbing'); });
+  lb.addEventListener('dblclick', function(){ lbScale=1; lbX=0; lbY=0; applyLb(); });
+  window.addEventListener('keydown', function(e){ if(e.key==='Escape' && lb.classList.contains('kaya-show')) closeLb(); });
+  zoomBtn.addEventListener('click', function(e){ e.preventDefault(); e.stopPropagation(); if(zoomTarget) openLb(zoomTarget); });
+  // Annotating while zoomed has to resolve back to the ARTIFACT, not the clone -
+  // a selector generated against the clone would never match anything real.
+  // Walk the child-index path up the clone, then replay it down the original.
+  function mapCloneToSource(node){
+    const stage=lb.querySelector('[data-lb-stage]');
+    const cloneRoot=stage && stage.firstElementChild;
+    if(!cloneRoot || !lbSource || !cloneRoot.contains(node)) return null;
+    const path=[]; let cur=node;
+    while(cur && cur!==cloneRoot){
+      const parent=cur.parentElement; if(!parent) return null;
+      path.unshift(Array.prototype.indexOf.call(parent.children, cur));
+      cur=parent;
+    }
+    let out=lbSource;
+    for(let i=0;i<path.length;i++){
+      out = out && out.children ? out.children[path[i]] : null;
+      if(!out) return null;
+    }
+    return out;
+  }
+  lb.addEventListener('click', function(e){
+    if(!state.annotate) return;
+    if(e.target===lb || e.target.hasAttribute('data-lb-close')) return;
+    const src=mapCloneToSource(isSvg(e.target)?svgTarget(e.target):e.target);
+    if(!src) return;
+    e.preventDefault(); e.stopPropagation();
+    closeLb();
+    const r=src.getBoundingClientRect();
+    placeHl(r, true);
+    openPop(Math.min(r.left+20, window.innerWidth-340), Math.min(r.top+20, window.innerHeight-220),
+            refFor(src), { selector:selectorFor(src), anchorText:anchorTextOf(src) });
+  }, true);
+
+  // Mounted here, after their declarations - appending earlier hits the TDZ.
+  root.appendChild(lb); root.appendChild(zoomBtn);
+
+  document.addEventListener('mouseover', function(e){
+    if(lb.classList.contains('kaya-show')) return;
+    if(isOurs(e.target)) return;
+    const el=e.target && e.target.closest ? e.target.closest(ZOOM_SEL) : null;
+    if(el) showZoomBtn(el); else if(e.target!==zoomBtn) hideZoomBtn();
+  }, true);
+
+  window.kaya = {
+    // Exposed so artifact authors (and tests) can resolve the same selector Kaya
+    // would record for an element - including inside SVG, where tag case and
+    // classList handling differ from HTML.
+    selectorFor: function(el){ return selectorFor(el); },
+    svgTarget: function(el){ return svgTarget(el); },
+    queuePrompt: function(prompt, opts){ opts=opts||{}; addQueued({ ref:null, note:prompt, display: opts.text || prompt, agentText: prompt, selector: opts.selector||null, selectedText: opts.selectedText||null }); },
+    sendQueuedPrompts: function(){ send(); }
+  };
+
+  logEl.innerHTML='<div class="kaya-empty">No messages yet.<br>Flip on <b>Annotate</b>, click a box or select some text, add a note, then <b>Send to Agent</b>.</div>';
+  async function refresh(){
+    try{ const r=await fetch(base+'/state?client='+clientId+'&staged='+state.queued.length); if(!r.ok) return; const d=await r.json();
+      renderHistory(d.history||[]);
+      state.ended=Boolean(d.ended); applyEnded();
+      bannerEl.classList.toggle('kaya-show', (d.clients||1) > 1 && !!d.primary && d.primary!==clientId);
+      // The agent rewrote the artifact on disk -> reload so the body reflects it
+      // (the conversation persists on the server). Only when nothing is staged,
+      // so we never drop unsent annotations; otherwise reload after the next send.
+      if(d.fileMtime){
+        if(state.fileMtime==null){ state.fileMtime=d.fileMtime; validateAnchors(); }
+        else if(d.fileMtime!==state.fileMtime){
+          state.fileMtime=d.fileMtime;
+          if(!state.queued.length){ location.reload(); return; }
+          state.needsReload=true;
+        }
+      }
+    } catch(_e){}
+  }
+  refresh(); window.setInterval(refresh, 1200);
+})();
+`;
+
+// `sessionKey` scopes the client's staged-annotation drawer to the reviewed file.
+// Pass the file path (or any stable per-review id); it is hashed to keep the
+// user's directory layout out of the served HTML.
+function stageKeyFor(sessionKey) {
+  const s = String(sessionKey || 'default');
+  let h = 0;
+  for (let i = 0; i < s.length; i++) { h = (Math.imul(31, h) + s.charCodeAt(i)) | 0; }
+  return (h >>> 0).toString(36);
+}
+
+export function overlayMarkup(sessionKey) {
+  const script = OVERLAY_SCRIPT.replace('__KAYA_SESSION_KEY__', stageKeyFor(sessionKey));
+  return `<style id="kaya-overlay-style">${OVERLAY_STYLE}</style><script id="kaya-overlay-script">${script}</script>`;
+}
+
+export function injectOverlay(html, sessionKey) {
+  const marker = overlayMarkup(sessionKey);
+  if (/<\/body>/i.test(html)) return html.replace(/<\/body>/i, `${marker}</body>`);
+  return `${html}\n${marker}`;
+}
+
+// Default the review canvas to dark. Injected early (top of <head>) so an
+// artifact that declares its own theme still wins; only pages that leave the
+// background unset fall through to this dark default.
+export function injectBaseTheme(html) {
+  const style = '<style id="kaya-base">html{background:#0b0b0b;color-scheme:dark}body{background-color:#0f0f0f;color:#e8e8e8}</style>';
+  if (/<head[^>]*>/i.test(html)) return html.replace(/<head([^>]*)>/i, `<head$1>${style}`);
+  if (/<html[^>]*>/i.test(html)) return html.replace(/<html([^>]*)>/i, `<html$1>${style}`);
+  return `${style}${html}`;
+}
+
+// Give the browser tab a meaningful name (the file being reviewed) so multiple
+// open sessions are easy to tell apart, instead of "127.0.0.1". Only fills in a
+// title when the artifact does not already declare its own.
+export function injectTitle(html, name) {
+  if (/<title[^>]*>[\s\S]*?<\/title>/i.test(html)) return html;
+  const tag = `<title>${String(name || 'Kaya review').replace(/[<>&]/g, '')}</title>`;
+  if (/<head[^>]*>/i.test(html)) return html.replace(/<head([^>]*)>/i, `<head$1>${tag}`);
+  if (/<html[^>]*>/i.test(html)) return html.replace(/<html([^>]*)>/i, `<html$1><head>${tag}</head>`);
+  return `<head>${tag}</head>${html}`;
+}
