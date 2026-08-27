@@ -187,15 +187,29 @@ export class KayaReviewServer {
     if (url.pathname === '/__kaya/feedback' && request.method === 'POST') {
       try {
         const data = JSON.parse(await body(request));
-        if (!data || typeof data.text !== 'string' || !data.text.trim()) return json(response, 400, { error: 'text is required' });
-        const item = { text: data.text.trim(), tag: data.tag || 'comment', selector: data.selector || undefined, selectedText: data.selectedText || undefined, createdAt: new Date().toISOString() };
-        item.rawText = `[${item.tag}]${item.selector ? ` ${item.selector}` : ''}${item.selectedText ? `\nSelected: ${item.selectedText}` : ''}\n${item.text}`;
-        this.queue.push(item);
-        this.history.push({ role: 'you', text: item.text, ref: data.ref || item.selectedText || null });
+        const rawItems = Array.isArray(data?.items) ? data.items : [];
+        const endSession = Boolean(data?.endSession);
+        if (!rawItems.length && !endSession) return json(response, 400, { error: 'items is required' });
+        // Validate the whole batch BEFORE touching any state: a client that sent N
+        // annotations plus a final message in one request must never end up with
+        // the first K persisted and the rest silently dropped because item K+1
+        // happened to be malformed. Reject atomically, or not at all.
+        const prepared = [];
+        for (const raw of rawItems) {
+          if (!raw || typeof raw.text !== 'string' || !raw.text.trim()) return json(response, 400, { error: 'text is required' });
+          const item = { text: raw.text.trim(), tag: raw.tag || 'comment', selector: raw.selector || undefined, selectedText: raw.selectedText || undefined, createdAt: new Date().toISOString() };
+          item.rawText = `[${item.tag}]${item.selector ? ` ${item.selector}` : ''}${item.selectedText ? `\nSelected: ${item.selectedText}` : ''}\n${item.text}`;
+          prepared.push({ item, ref: raw.ref ?? item.selectedText ?? null });
+        }
+        for (const { item, ref } of prepared) {
+          this.queue.push(item);
+          this.history.push({ role: 'you', text: item.text, ref });
+        }
+        if (endSession) { this.ended = true; this.endedBy = 'user'; }
         this.persistHistory();
         this.touch();
         this.notify();
-        return json(response, 202, { queued: true });
+        return json(response, 202, { queued: true, ended: this.ended });
       } catch (error) { return json(response, 400, { error: error instanceof Error ? error.message : 'invalid JSON' }); }
     }
     if (url.pathname === '/__kaya/end' && request.method === 'POST') {

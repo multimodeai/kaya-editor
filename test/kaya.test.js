@@ -61,7 +61,7 @@ describe('Kaya HTTP review server', () => {
     const feedback = await fetch(`${server.address()}__kaya/feedback`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ text: 'Make the title warmer', tag: 'change', selector: 'h1' })
+      body: JSON.stringify({ items: [{ text: 'Make the title warmer', tag: 'change', selector: 'h1' }] })
     });
     expect(feedback.status).toBe(202);
     const pollText = await (await polling).text();
@@ -79,6 +79,55 @@ describe('Kaya HTTP review server', () => {
     await fetch(`${server.address()}__kaya/end`, { method: 'POST' });
     const response = await fetch(`${server.address()}__kaya/poll`);
     expect(await response.text()).toContain('session_ended: true');
+  });
+
+  it('regression: a batch with one malformed item is rejected atomically, nothing persisted', async () => {
+    const { file } = fixture();
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+
+    const feedback = await fetch(`${server.address()}__kaya/feedback`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ items: [{ text: 'good note one' }, { text: '   ' }, { text: 'good note three' }] })
+    });
+    expect(feedback.status).toBe(400);
+    const state = await (await fetch(`${server.address()}__kaya/state`)).json();
+    expect(state.history).toEqual([]); // the whole batch was rejected, not just the bad item
+  });
+
+  it('folds Send & End into one atomic request: items land and the session ends together', async () => {
+    const { file } = fixture();
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+
+    const feedback = await fetch(`${server.address()}__kaya/feedback`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ items: [{ text: 'one last note' }], endSession: true })
+    });
+    expect(feedback.status).toBe(202);
+    expect((await feedback.json()).ended).toBe(true);
+    const state = await (await fetch(`${server.address()}__kaya/state`)).json();
+    expect(state.ended).toBe(true);
+    expect(state.history.map((h) => h.text)).toEqual(['one last note']);
+  });
+
+  it('a bare Send & End with nothing queued still ends the session', async () => {
+    const { file } = fixture();
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+
+    const feedback = await fetch(`${server.address()}__kaya/feedback`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ items: [], endSession: true })
+    });
+    expect(feedback.status).toBe(202);
+    expect((await (await fetch(`${server.address()}__kaya/state`)).json()).ended).toBe(true);
   });
 });
 
@@ -130,16 +179,31 @@ describe('staged annotations survive reload', () => {
     expect(overlayMarkup('/tmp/one.html')).toContain(ka); // stable across calls
   });
 
-  it('wires save, restore and clear around the queue', async () => {
+  it('wires save, restore, and an atomic clear around the queue', async () => {
     const { OVERLAY_SCRIPT } = await import('../src/overlay.js');
     expect(OVERLAY_SCRIPT).toContain('function saveStage');
     expect(OVERLAY_SCRIPT).toContain('function loadStage');
     expect(OVERLAY_SCRIPT).toContain('function clearStage');
     // every queue mutation funnels through renderPending, so saving there covers all paths
     expect(OVERLAY_SCRIPT).toMatch(/function renderPending\(\)\{\s*saveStage\(\);/);
-    // staging is only dropped after a send succeeds, never before
-    const sendBody = OVERLAY_SCRIPT.slice(OVERLAY_SCRIPT.indexOf('async function send()'));
-    expect(sendBody.indexOf('clearStage()')).toBeGreaterThan(sendBody.indexOf("fetch(base+'/feedback'"));
+    // regression (2026-08-27): the queue used to be spliced out and posted one item
+    // at a time, so a single failed request silently dropped every item queued
+    // behind it while the UI had already cleared them. The whole queue must now go
+    // out as ONE request, and state.queued must only be cleared - and clearStage()
+    // only run - AFTER that request confirms success; a failure must return before
+    // either, leaving every queued item intact to retry.
+    const sendBody = OVERLAY_SCRIPT.slice(OVERLAY_SCRIPT.indexOf('async function send(endAfter)'));
+    expect(sendBody.startsWith('async function send(endAfter)')).toBe(true);
+    const fetchIdx = sendBody.indexOf("fetch(base+'/feedback'");
+    const failReturnIdx = sendBody.indexOf('if(!ok){');
+    const clearIdx = sendBody.indexOf('state.queued=[]');
+    const stageClearIdx = sendBody.indexOf('clearStage()');
+    expect(fetchIdx).toBeGreaterThan(-1);
+    expect(failReturnIdx).toBeGreaterThan(fetchIdx);
+    expect(clearIdx).toBeGreaterThan(failReturnIdx);
+    expect(stageClearIdx).toBeGreaterThan(clearIdx);
+    expect(sendBody.indexOf('return false;')).toBeLessThan(clearIdx);
+    expect(OVERLAY_SCRIPT).toContain("items:items, endSession: !!endAfter");
     expect(OVERLAY_SCRIPT).toContain('beforeunload');
     expect(new Function(OVERLAY_SCRIPT)).toBeTruthy(); // client script parses
   });

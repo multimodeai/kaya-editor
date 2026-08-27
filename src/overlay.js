@@ -220,7 +220,7 @@ export const OVERLAY_SCRIPT = `
     addQueued({ ref:state.ref, note:note, display:note, agentText:note, selector:ctx.selector, selectedText:ctx.selectedText,
                 anchorText:ctx.anchorText||null, anchorHash:ctx.anchorText?hashText(ctx.anchorText):null, anchorState:'ok' });
     closePop();
-    if(sendNow) send();
+    if(sendNow) send(false);
   }
 
   // ---- self-validating anchors ----
@@ -297,20 +297,40 @@ export const OVERLAY_SCRIPT = `
     logEl.innerHTML=out; logEl.scrollTop=logEl.scrollHeight;
   }
 
-  async function send(){
+  // The whole queue goes out as ONE request and is only cleared locally once the
+  // server confirms it was persisted. A partial/sequential send made it possible
+  // for one flaky request to silently drop every item queued behind it while the
+  // UI had already cleared them - this way a failure leaves state.queued
+  // untouched, so nothing typed is ever lost and the user can just retry.
+  async function send(endAfter){
     const msg=composerInput.value.trim();
-    if(msg){ state.queued.push({ ref:null, note:msg, display:msg, agentText:msg }); composerInput.value=''; }
-    const items=state.queued.splice(0); renderPending();
-    for(let k=0;k<items.length;k++){ const it=items[k];
+    if(msg){ state.queued.push({ ref:null, note:msg, display:msg, agentText:msg }); composerInput.value=''; renderPending(); }
+    if(!state.queued.length && !endAfter) return true;
+    sendBtn.disabled=true; endBtn.disabled=true;
+    const items=state.queued.map(function(it){
       // A stale anchor means the location reference cannot be trusted: say so
       // rather than let the agent act on a pointer that no longer resolves.
       const outText = it.anchorState==='stale' ? '[stale] '+it.agentText : it.agentText;
-      try{ await fetch(base+'/feedback',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({ text: outText, tag:'comment', selector: it.selector, selectedText: it.selectedText, ref: it.ref||null })}); }
-      catch(_e){ state.queued.unshift(it); renderPending(); return; }
+      return { text: outText, tag:'comment', selector: it.selector, selectedText: it.selectedText, ref: it.ref||null };
+    });
+    let ok=false;
+    try{
+      const res=await fetch(base+'/feedback',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({ items:items, endSession: !!endAfter })});
+      ok=res.ok;
+    }catch(_e){ ok=false; }
+    if(!ok){ applyEnded(); return false; }  // rejected/failed atomically - state.queued was never touched, so it is still all there to retry
+    state.queued=[]; renderPending(); clearStage();
+    if(endAfter) state.ended=true;
+    applyEnded();
+    if(state.needsReload){
+      state.needsReload=false;
+      await refresh();  // let the just-sent messages render into the log before navigating away
+      state.leaving=true;
+      setTimeout(function(){ location.reload(); }, 600);
+      return true;
     }
-    clearStage();
-    if(state.needsReload){ state.needsReload=false; state.leaving=true; location.reload(); return; }
     refresh();
+    return true;
   }
   // Restore anything staged before the last reload, and keep the composer draft too.
   (function restoreStage(){
@@ -335,9 +355,9 @@ export const OVERLAY_SCRIPT = `
     composerInput.placeholder = e ? 'Review ended - run kaya again to reopen and continue.' : 'Write a message for the agent...';
     convo.classList.toggle('kaya-ended', e);
   }
-  sendBtn.addEventListener('click', function(){ send(); });
-  endBtn.addEventListener('click', async function(){ await send(); try{ await fetch(base+'/end?by=user',{method:'POST'}); state.ended=true; applyEnded(); refresh(); }catch(_e){} });
-  composerInput.addEventListener('keydown', function(e){ if(e.key==='Enter' && (e.metaKey||e.ctrlKey)){ e.preventDefault(); send(); } });
+  sendBtn.addEventListener('click', function(){ send(false); });
+  endBtn.addEventListener('click', function(){ send(true); });
+  composerInput.addEventListener('keydown', function(e){ if(e.key==='Enter' && (e.metaKey||e.ctrlKey)){ e.preventDefault(); send(false); } });
 
   // ---- navbar overflow menu ----
   const menu = nav.querySelector('[data-menu]');
@@ -602,7 +622,7 @@ export const OVERLAY_SCRIPT = `
     selectorFor: function(el){ return selectorFor(el); },
     svgTarget: function(el){ return svgTarget(el); },
     queuePrompt: function(prompt, opts){ opts=opts||{}; addQueued({ ref:null, note:prompt, display: opts.text || prompt, agentText: prompt, selector: opts.selector||null, selectedText: opts.selectedText||null }); },
-    sendQueuedPrompts: function(){ send(); }
+    sendQueuedPrompts: function(){ send(false); }
   };
 
   logEl.innerHTML='<div class="kaya-empty">No messages yet.<br>Flip on <b>Annotate</b>, click a box or select some text, add a note, then <b>Send to Agent</b>.</div>';
