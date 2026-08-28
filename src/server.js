@@ -177,11 +177,26 @@ export class KayaReviewServer {
     }
     if (url.pathname === '/__kaya/poll' && request.method === 'GET') {
       const result = await this.poll(url.searchParams.get('agent_reply') || undefined);
-      const feedback = result.feedback.map((item) => item.rawText).join('\n\n');
+      const n = result.feedback.length;
+      // Number every item once there is more than one, so a batch of N queued
+      // annotations reads as N distinct action items an agent must work through,
+      // not one wall of text that gets skimmed and treated as a single request -
+      // an agent answering only the first of several queued items and dropping
+      // the rest was observed in practice (2026-08-28).
+      const feedback = n > 1
+        ? result.feedback.map((item, i) => `[item ${i + 1}/${n}]\n${item.rawText}`).join('\n\n')
+        : result.feedback.map((item) => item.rawText).join('\n\n');
       response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
       const held = this.clients.size > 0 ? this.stagedCount() : 0;
       const heldLine = held > 0 ? `held: ${held} staged\n` : '';
-      response.end(`${feedback}${feedback ? '\n\n' : ''}session_ended: ${result.ended ? 'true' : 'false'}\n${heldLine}`);
+      // Baked into every delivery, not just documented once in a skill file, so
+      // it survives even when the agent never loaded (or has since forgotten)
+      // that guidance - the same incident showed an agent answering fully in
+      // its own chat/terminal instead of writing the reply back into Kaya.
+      const nextStepLine = feedback && !result.ended
+        ? `next_step: address every numbered item above, apply the changes, then run \`kaya poll <file> --agent-reply "<what changed>"\` again BEFORE replying to the user anywhere else. Do not answer outside Kaya while this review is open.\n`
+        : '';
+      response.end(`${feedback}${feedback ? '\n\n' : ''}session_ended: ${result.ended ? 'true' : 'false'}\n${heldLine}${nextStepLine}`);
       return;
     }
     if (url.pathname === '/__kaya/feedback' && request.method === 'POST') {

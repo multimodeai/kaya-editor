@@ -115,6 +115,59 @@ describe('Kaya HTTP review server', () => {
     expect(state.history.map((h) => h.text)).toEqual(['one last note']);
   });
 
+  it('regression: a multi-item batch is numbered so the agent cannot answer only the first', async () => {
+    const { file } = fixture();
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+
+    await fetch(`${server.address()}__kaya/feedback`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ items: [{ text: 'first note' }, { text: 'second note' }, { text: 'third note' }] })
+    });
+    const pollText = await (await fetch(`${server.address()}__kaya/poll`)).text();
+    expect(pollText).toContain('[item 1/3]');
+    expect(pollText).toContain('[item 2/3]');
+    expect(pollText).toContain('[item 3/3]');
+    expect(pollText).toContain('first note');
+    expect(pollText).toContain('second note');
+    expect(pollText).toContain('third note');
+    // a single-item batch is not cluttered with a redundant "[item 1/1]" marker
+    await fetch(`${server.address()}__kaya/feedback`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ items: [{ text: 'lone note' }] })
+    });
+    const single = await (await fetch(`${server.address()}__kaya/poll`)).text();
+    expect(single).not.toContain('[item 1/1]');
+  });
+
+  it('regression: every delivered poll carries a next_step instructing the agent to reply through Kaya, not elsewhere', async () => {
+    const { file } = fixture();
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+
+    await fetch(`${server.address()}__kaya/feedback`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ items: [{ text: 'one note' }] })
+    });
+    const pollText = await (await fetch(`${server.address()}__kaya/poll`)).text();
+    expect(pollText).toContain('next_step:');
+    expect(pollText).toContain('Do not answer outside Kaya while this review is open');
+
+    // no next_step once the session has ended - there is nowhere left to reply into
+    await fetch(`${server.address()}__kaya/feedback`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ items: [{ text: 'final note' }], endSession: true })
+    });
+    const endedPoll = await (await fetch(`${server.address()}__kaya/poll`)).text();
+    expect(endedPoll).not.toContain('next_step:');
+  });
+
   it('a bare Send & End with nothing queued still ends the session', async () => {
     const { file } = fixture();
     const server = new KayaReviewServer(file);
