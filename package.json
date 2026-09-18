@@ -1,6 +1,6 @@
 {
   "name": "kaya-editor",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Local browser review surface for agent-written artifacts. Annotate, send feedback, no upload.",
   "type": "module",
   "bin": {
