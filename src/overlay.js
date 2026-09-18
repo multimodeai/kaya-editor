@@ -209,7 +209,15 @@ export const OVERLAY_SCRIPT = `
     pop.style.left=px+'px'; pop.style.top=py+'px';
     popInput.focus();
   }
-  function closePop(){ pop.classList.remove('kaya-show'); state.ctx=null; state.ref=null; hideHl(); }
+  function closePop(){
+    pop.classList.remove('kaya-show'); state.ctx=null; state.ref=null; hideHl();
+    // Anything pasted onto an abandoned note is abandoned with it, or it would
+    // silently reattach to whatever note is written next.
+    if(state.pendingAttachments && state.pendingAttachments.length){
+      state.pendingAttachments.length=0;
+      if(state.showAttachCount) state.showAttachCount();
+    }
+  }
   pop.querySelector('[data-pop-cancel]').addEventListener('click', closePop);
   pop.querySelector('[data-pop-queue]').addEventListener('click', function(){ queueFromPop(false); });
   popInput.addEventListener('keydown', function(e){
@@ -392,7 +400,7 @@ export const OVERLAY_SCRIPT = `
     let ok=false;
     const post=function(snapshot){
       return fetch(base+'/feedback',{method:'POST',headers:{'content-type':'application/json'},
-        body:JSON.stringify({ items:items, endSession: !!endAfter, snapshot: snapshot })});
+        body:JSON.stringify({ items:items, endSession: !!endAfter, snapshot: snapshot, client: clientId })});
     };
     try{
       const res=await post(domSnapshot());

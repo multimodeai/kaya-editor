@@ -303,6 +303,68 @@ describe('Kaya HTTP review server', () => {
     }
   });
 
+  it('regression: held never counts notes that were delivered in the same response', async () => {
+    const { file } = fixture();
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+
+    // a heartbeat reporting two notes typed but not yet sent, then the send itself
+    await fetch(`${server.address()}__kaya/state?client=c1&staged=2`);
+    await fetch(`${server.address()}__kaya/feedback`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ items: [{ text: 'note one' }, { text: 'note two' }], client: 'c1' })
+    });
+    const pollText = await (await fetch(`${server.address()}__kaya/poll`)).text();
+    expect(pollText).toContain('note one');
+    expect(pollText).toContain('note two');
+    // the client's heartbeat lags a send by up to 1.2s, so this used to report
+    // the very notes it was delivering as still unsent
+    expect(pollText).not.toContain('held:');
+  });
+
+  it('still reports genuinely unsent notes as held', async () => {
+    const { file } = fixture();
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+
+    // two tabs: c1 sends its batch, c2 still has three notes typed and unsent
+    await fetch(`${server.address()}__kaya/state?client=c1&staged=1`);
+    await fetch(`${server.address()}__kaya/state?client=c2&staged=3`);
+    await fetch(`${server.address()}__kaya/feedback`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ items: [{ text: 'from tab one' }], client: 'c1' })
+    });
+    const next = await (await fetch(`${server.address()}__kaya/poll`)).text();
+    expect(next).toContain('from tab one');
+    expect(next).toContain('held: 3 staged');   // c2's notes are genuinely unsent
+  });
+
+  it('regression: each snapshot gets its own path so a later batch cannot overwrite it', async () => {
+    const { file } = fixture();
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+
+    const send = async (note, snapshot) => {
+      await fetch(`${server.address()}__kaya/feedback`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ items: [{ text: note }], snapshot })
+      });
+      return (await (await fetch(`${server.address()}__kaya/poll`)).text()).match(/dom_snapshot: (\S+)/)[1];
+    };
+    const first = await send('one', '<html>FIRST STATE</html>');
+    const second = await send('two', '<html>SECOND STATE</html>');
+    expect(first).not.toBe(second);
+    // the first path must still resolve to what it captured, not the newer page
+    expect(readFileSync(first, 'utf8')).toContain('FIRST STATE');
+    expect(readFileSync(second, 'utf8')).toContain('SECOND STATE');
+  });
+
   it('a bare Send & End with nothing queued still ends the session', async () => {
     const { file } = fixture();
     const server = new KayaReviewServer(file);

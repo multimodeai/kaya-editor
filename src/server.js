@@ -3,7 +3,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { injectOverlay, injectBaseTheme, injectTitle } from './overlay.js';
 import { injectFavicon } from './favicon.js';
-import { removeRegistry, writeRegistry, readHistory, writeHistory, listRegistries, writeSnapshot, writeAttachment } from './registry.js';
+import { removeRegistry, writeRegistry, readHistory, writeHistory, listRegistries, writeSnapshot, writeAttachment, pruneScratch } from './registry.js';
 import { injectMermaidRuntime, mermaidRuntime } from './mermaid.js';
 import { markdownDocument } from './markdown.js';
 import { inlineAssets } from './export.js';
@@ -85,7 +85,7 @@ export class KayaReviewServer {
 
   persistHistory() { writeHistory(this.file, this.history); }
   touch() { this.lastActivity = Date.now(); }
-  stagedCount() { let n = 0; for (const v of this.staged.values()) n += v; return n; }
+  stagedCount() { let n = 0; for (const v of this.staged.values()) n += (v && v.n) || 0; return n; }
 
   // listening: a poll is attached right now.
   // working:   none attached, but one was recently - the agent took the feedback
@@ -128,6 +128,7 @@ export class KayaReviewServer {
       this.server.listen(this.port, this.host, () => {
         this.server.off('error', rejectStart);
         this.port = this.server.address().port;
+        pruneScratch(this.file);
         this.sweepTimer = setInterval(() => this.sweepClients(), SWEEP_MS);
         if (this.sweepTimer.unref) this.sweepTimer.unref();
         resolveStart(this);
@@ -229,7 +230,7 @@ export class KayaReviewServer {
       // held session costs no extra endpoint and no extra timer.
       if (cid) {
         const n = Number(url.searchParams.get('staged'));
-        this.staged.set(cid, Number.isFinite(n) && n > 0 ? n : 0);
+        this.staged.set(cid, { n: Number.isFinite(n) && n > 0 ? n : 0, at: now });
       }
       for (const id of this.staged.keys()) if (!this.clients.has(id)) this.staged.delete(id);
       for (const [id, t] of this.clients) if (now - t > CLIENT_STALE_MS) this.clients.delete(id);
@@ -318,6 +319,10 @@ export class KayaReviewServer {
           this.history.push({ role: 'you', text: item.text, ref });
         }
         if (endSession) { this.ended = true; this.endedBy = 'user'; }
+        // Everything this client had queued went out in this batch, so its last
+        // heartbeat is already spent. Without this the held line reported the
+        // very notes it was delivering as still unsent. Other tabs are untouched.
+        if (prepared.length && typeof data.client === 'string') this.staged.set(data.client, { n: 0, at: Date.now() });
         // What the page actually looked like when the note was written. Anchors
         // say WHICH element was meant; this says what state it was in, which
         // matters once the artifact has been rewritten underneath the note.

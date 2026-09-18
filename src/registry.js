@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -18,20 +18,37 @@ export function registryPath(file) { return join(registryDirectory(), `${keyFor(
 
 export function historyPath(file) { return join(registryDirectory(), `${keyFor(file)}.history.json`); }
 
-export function snapshotPath(file) { return join(registryDirectory(), `${keyFor(file)}.snapshot.html`); }
-
 // Attachments live beside the other session state, named by the reviewed file so
 // two open reviews never collide, and are handed to the agent as local paths.
+function scratchPath(file, kind, extension) {
+  return join(registryDirectory(), `${keyFor(file)}.${kind}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}.${extension}`);
+}
+
 export function writeAttachment(file, bytes, extension) {
-  const name = `${keyFor(file)}.att-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}.${extension}`;
-  const path = join(registryDirectory(), name);
+  const path = scratchPath(file, 'att', extension);
   writeFileSync(path, bytes);
   return path;
 }
 
 export function writeSnapshot(file, html) {
-  try { writeFileSync(snapshotPath(file), html); return snapshotPath(file); }
+  // Unique per batch: a fixed name would let a later send overwrite a snapshot
+  // whose path was already handed to an agent that had not opened it yet.
+  try { const path = scratchPath(file, 'snap', 'html'); writeFileSync(path, html); return path; }
   catch (_error) { return undefined; }  // best-effort: a note is still worth delivering without it
+}
+
+// Snapshots and attachments are disposable once old. Without this, every pasted
+// image and every captured page stays in the state directory forever.
+export function pruneScratch(file, maxAgeMs = 7 * 24 * 60 * 60 * 1000) {
+  const prefix = keyFor(file);
+  const cutoff = Date.now() - maxAgeMs;
+  try {
+    for (const name of readdirSync(registryDirectory())) {
+      if (!name.startsWith(`${prefix}.snap-`) && !name.startsWith(`${prefix}.att-`)) continue;
+      const path = join(registryDirectory(), name);
+      try { if (statSync(path).mtimeMs < cutoff) unlinkSync(path); } catch (_error) { /* already gone */ }
+    }
+  } catch (_error) { /* best-effort housekeeping, never fatal */ }
 }
 
 export function readHistory(file) {
