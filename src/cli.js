@@ -12,6 +12,90 @@ function usage() {
   console.error('Usage: kaya <file> | kaya list | kaya poll <file> [--agent-reply <msg>] | kaya end <file> | kaya <file> --reopen | kaya export <file> [--out <path>] | kaya stop [file]');
 }
 
+// The full workflow reference lives HERE, in the binary, not in a skill file.
+// An installed skill file drifts from the code it describes - Kaya's claimed for
+// a while that it shipped inside mm-kit and that the server self-stopped when
+// idle, neither of which was true - and an agent has no way to tell a stale
+// instruction from a current one. This ships with the code, so it cannot drift.
+function help() {
+  return `kaya - local browser review surface for agent-written artifacts.
+
+  Build an artifact, open it for the human to annotate, then poll for what they
+  said. Everything runs on their machine; nothing is uploaded anywhere.
+
+COMMANDS
+  kaya <file>                          Open or resume a review. Prints the URL.
+  kaya <file> --reopen                 Resume a review the USER ended.
+  kaya poll <file> [--agent-reply MSG] Block until they send feedback or end it.
+  kaya list                            Every live session, newest first.
+  kaya end <file>                      End the review as the agent.
+  kaya export <file> [--out PATH]      Portable single file, local assets inlined.
+  kaya stop [file]                     Shut down that file's server.
+
+THE LOOP
+  1. Write the artifact. HTML goes in .kaya/<name>.html by default. A .md file
+     can be reviewed directly - Kaya renders it and never rewrites the source.
+  2. kaya <file>
+  3. PUT THE PRINTED URL IN YOUR REPLY TO THE USER, in full, every time you
+     mention the review. They cannot see your tool output. A URL from earlier in
+     the conversation is usually dead: a restarted server takes a new port.
+  4. kaya poll <file> --agent-reply "<what you built, what to look at first>"
+  5. Apply everything it returns, then poll again with a fresh --agent-reply
+     saying what changed. That reply is how your answer reaches the browser.
+  6. kaya end <file> when the review is finished.
+
+RULES THAT ARE EASY TO GET WRONG
+  Answer IN Kaya, not in your own chat. While a review is open, a reply the user
+  only sees in your terminal did not reach the review they are reading.
+
+  Address EVERY item. A poll carrying several annotations numbers them
+  [item 1/N] .. [item N/N]. Each is a separate thing to act on. Delivery is
+  destructive, so read the whole response - nothing redelivers it.
+
+  One poll at a time per file. Concurrent polls all receive a copy of the same
+  batch, which reads as duplicated feedback and wastes tokens. Check for a
+  running poll before starting another.
+
+  Do not re-run "kaya <file>" after editing the artifact. The open tab live
+  reloads. Reopening just spawns duplicate windows.
+
+  "held: N staged" means the user has N notes typed but NOT sent. They are not
+  readable until the user presses Send. Say so rather than guessing.
+
+  "browser_disconnected: true" means the window was closed. The session is still
+  resumable - ask the user whether to reopen or end it. Do not do either alone.
+
+  session_ended: true ends the loop. Stop polling. Do not reopen uninvited.
+
+  Bare "kaya stop" with no file stops EVERY session on the machine, including
+  unrelated projects. Pass the file.
+
+  There is no idle auto-stop. A server runs, holding whatever code it started
+  with, until stopped - a reinstall does not change an already-running one.
+
+DELEGATING
+  A subagent inherits none of this. Spell out in its prompt: the exact command,
+  that it must report the full URL back, and that it must poll before ending its
+  turn. Otherwise it opens an artifact and nothing ever drains the queue.
+
+WRITING THE ARTIFACT
+  Lead with the decision, the risk and the next action. Use sections, cards,
+  tables and diagrams over prose. Give every nested grid or flex child
+  minmax(0,1fr) and min-width:0 so nothing overflows sideways; only tables,
+  diagrams and code may scroll, inside their own container. Show real UI as a
+  screenshot rather than describing it.
+
+  Match the design system of the project the artifact is ABOUT - its theme
+  config, CSS variables, component library - or the look the user asked for.
+  Write self-contained CSS only when neither exists. Say which you used.
+
+  Mermaid in a .mermaid or fenced block renders automatically, read-only.
+  <div data-kaya-ask="id" data-kaya-label="Question?" data-kaya-options="a|b|c">
+  renders one-click choices whose answers come back typed, as [ask] id = value.
+  Assets must sit beside the artifact and be referenced relatively, never with
+  a leading slash.`;
+}
+
 function parseFlag(args, name) {
   const index = args.indexOf(name);
   if (index === -1) return undefined;
@@ -173,7 +257,7 @@ export async function main(args) {
     return;
   }
   if (args[0] === '--help' || args[0] === '-h' || args[0] === 'help') {
-    usage();
+    console.log(help());
     return;
   }
   switch (args[0]) {

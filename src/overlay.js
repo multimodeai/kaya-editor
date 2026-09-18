@@ -314,6 +314,17 @@ export const OVERLAY_SCRIPT = `
   // for one flaky request to silently drop every item queued behind it while the
   // UI had already cleared them - this way a failure leaves state.queued
   // untouched, so nothing typed is ever lost and the user can just retry.
+  // The artifact as rendered, with Kaya's own chrome stripped back out so the
+  // agent gets the page under review rather than the reviewer's UI around it.
+  function domSnapshot(){
+    try{
+      const clone=document.documentElement.cloneNode(true);
+      const drop=clone.querySelectorAll('#kaya-overlay,#kaya-overlay-style,#kaya-overlay-script,#kaya-base');
+      for(let i=0;i<drop.length;i++) drop[i].remove();
+      const html='<!doctype html>'+clone.outerHTML;
+      return html.length>2000000 ? null : html;   // oversized: send the notes without it
+    }catch(_e){ return null; }
+  }
   async function send(endAfter){
     const msg=composerInput.value.trim();
     if(msg){ state.queued.push({ ref:null, note:msg, display:msg, agentText:msg }); composerInput.value=''; renderPending(); }
@@ -326,10 +337,19 @@ export const OVERLAY_SCRIPT = `
       return { text: outText, tag:'comment', selector: it.selector, selectedText: it.selectedText, ref: it.ref||null };
     });
     let ok=false;
+    const post=function(snapshot){
+      return fetch(base+'/feedback',{method:'POST',headers:{'content-type':'application/json'},
+        body:JSON.stringify({ items:items, endSession: !!endAfter, snapshot: snapshot })});
+    };
     try{
-      const res=await fetch(base+'/feedback',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({ items:items, endSession: !!endAfter })});
+      const res=await post(domSnapshot());
       ok=res.ok;
-    }catch(_e){ ok=false; }
+      // The snapshot is a nice-to-have; the notes are not. If the batch was
+      // rejected, try once more without it rather than lose what was typed.
+      if(!ok){ try{ ok=(await post(null)).ok; }catch(_e2){ ok=false; } }
+    }catch(_e){
+      try{ ok=(await post(null)).ok; }catch(_e2){ ok=false; }
+    }
     if(!ok){ applyEnded(); return false; }  // rejected/failed atomically - state.queued was never touched, so it is still all there to retry
     state.queued=[]; renderPending(); clearStage();
     if(endAfter) state.ended=true;

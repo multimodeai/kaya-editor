@@ -3,7 +3,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { injectOverlay, injectBaseTheme, injectTitle } from './overlay.js';
 import { injectFavicon } from './favicon.js';
-import { removeRegistry, writeRegistry, readHistory, writeHistory, listRegistries } from './registry.js';
+import { removeRegistry, writeRegistry, readHistory, writeHistory, listRegistries, writeSnapshot } from './registry.js';
 import { injectMermaidRuntime, mermaidRuntime } from './mermaid.js';
 import { markdownDocument } from './markdown.js';
 import { inlineAssets } from './export.js';
@@ -22,6 +22,7 @@ const CLIENT_STALE_MS = 6000;
 const DISCONNECT_GRACE_MS = 15000;
 const WORKING_WINDOW_MS = 5 * 60 * 1000;
 const SWEEP_MS = 2000;
+const SNAPSHOT_CAP_BYTES = 2 * 1024 * 1024;
 
 function json(response, status, value) {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
@@ -32,7 +33,9 @@ function body(request) {
   return new Promise((resolveBody, reject) => {
     let value = '';
     request.setEncoding('utf8');
-    request.on('data', (chunk) => { value += chunk; if (value.length > 1024 * 1024) reject(new Error('request body too large')); });
+    // Roomy enough that a DOM snapshot riding along with a batch never pushes the
+    // request over the limit: feedback must not be lost because a page was big.
+    request.on('data', (chunk) => { value += chunk; if (value.length > 8 * 1024 * 1024) reject(new Error('request body too large')); });
     request.on('end', () => resolveBody(value));
     request.on('error', reject);
   });
@@ -68,6 +71,7 @@ export class KayaReviewServer {
     this.lastClientAt = 0;
     this.disconnected = false;
     this.sweepTimer = undefined;
+    this.snapshot = undefined;
     // Restore prior conversation from disk so reopening (or restarting) a file
     // keeps every round and annotation instead of starting blank.
     this.history = readHistory(this.file);
@@ -246,6 +250,10 @@ export class KayaReviewServer {
       response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
       const held = this.clients.size > 0 ? this.stagedCount() : 0;
       const heldLine = held > 0 ? `held: ${held} staged\n` : '';
+      const snapshotLine = feedback && this.snapshot
+        ? `dom_snapshot: ${this.snapshot}\n  (the rendered page as it looked when these notes were written - open it only if a note is unclear without seeing the page state)\n`
+        : '';
+      if (feedback) this.snapshot = undefined;
       // Baked into every delivery, not just documented once in a skill file, so
       // it survives even when the agent never loaded (or has since forgotten)
       // that guidance - the same incident showed an agent answering fully in
@@ -259,7 +267,7 @@ export class KayaReviewServer {
       const disconnectedLines = result.disconnected && !result.ended
         ? 'browser_disconnected: true\nnext_step: the review window was closed or disconnected. The session is still open and resumable. Ask the user whether to reopen it or end it, and do neither uninvited. Do not keep polling in a loop while it is disconnected.\n'
         : '';
-      response.end(`${feedback}${feedback ? '\n\n' : ''}session_ended: ${result.ended ? 'true' : 'false'}\n${heldLine}${disconnectedLines}${nextStepLine}`);
+      response.end(`${feedback}${feedback ? '\n\n' : ''}session_ended: ${result.ended ? 'true' : 'false'}\n${heldLine}${snapshotLine}${disconnectedLines}${nextStepLine}`);
       return;
     }
     if (url.pathname === '/__kaya/feedback' && request.method === 'POST') {
@@ -284,6 +292,14 @@ export class KayaReviewServer {
           this.history.push({ role: 'you', text: item.text, ref });
         }
         if (endSession) { this.ended = true; this.endedBy = 'user'; }
+        // What the page actually looked like when the note was written. Anchors
+        // say WHICH element was meant; this says what state it was in, which
+        // matters once the artifact has been rewritten underneath the note.
+        // Written to disk and passed as a path, never inlined - a full DOM in
+        // the poll output would bury the feedback it is supposed to support.
+        if (prepared.length && typeof data.snapshot === 'string' && data.snapshot.length <= SNAPSHOT_CAP_BYTES) {
+          this.snapshot = writeSnapshot(this.file, data.snapshot);
+        }
         this.persistHistory();
         this.touch();
         this.notify();

@@ -18,6 +18,13 @@ export function registryPath(file) { return join(registryDirectory(), `${keyFor(
 
 export function historyPath(file) { return join(registryDirectory(), `${keyFor(file)}.history.json`); }
 
+export function snapshotPath(file) { return join(registryDirectory(), `${keyFor(file)}.snapshot.html`); }
+
+export function writeSnapshot(file, html) {
+  try { writeFileSync(snapshotPath(file), html); return snapshotPath(file); }
+  catch (_error) { return undefined; }  // best-effort: a note is still worth delivering without it
+}
+
 export function readHistory(file) {
   const path = historyPath(file);
   if (!existsSync(path)) return [];

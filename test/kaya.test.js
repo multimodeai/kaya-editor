@@ -225,6 +225,42 @@ describe('Kaya HTTP review server', () => {
     expect(server.disconnected).toBe(false);
   });
 
+  it('passes a DOM snapshot by path, never inlined into the poll output', async () => {
+    const { file } = fixture();
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+
+    const marker = 'UNIQUE-SNAPSHOT-CONTENT-MARKER';
+    await fetch(`${server.address()}__kaya/feedback`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ items: [{ text: 'a note' }], snapshot: `<!doctype html><html><body>${marker}</body></html>` })
+    });
+    const pollText = await (await fetch(`${server.address()}__kaya/poll`)).text();
+    expect(pollText).toContain('dom_snapshot: ');
+    // the point of a path: a full DOM inlined here would bury the feedback
+    expect(pollText).not.toContain(marker);
+    const path = pollText.match(/dom_snapshot: (\S+)/)[1];
+    expect(readFileSync(path, 'utf8')).toContain(marker);
+  });
+
+  it('a note without a snapshot is delivered with no dom_snapshot line', async () => {
+    const { file } = fixture();
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+
+    await fetch(`${server.address()}__kaya/feedback`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ items: [{ text: 'no snapshot here' }] })
+    });
+    const pollText = await (await fetch(`${server.address()}__kaya/poll`)).text();
+    expect(pollText).toContain('no snapshot here');
+    expect(pollText).not.toContain('dom_snapshot:');
+  });
+
   it('a bare Send & End with nothing queued still ends the session', async () => {
     const { file } = fixture();
     const server = new KayaReviewServer(file);
@@ -469,5 +505,29 @@ describe('annotate while zoomed', () => {
     // annotating closes the lightbox and opens the normal popover on the source
     expect(OVERLAY_SCRIPT).toMatch(/const src=mapCloneToSource[\s\S]{0,400}closeLb\(\)/);
     expect(new Function(OVERLAY_SCRIPT)).toBeTruthy();
+  });
+});
+
+describe('guidance ships with the binary, not a skill file', () => {
+  it('kaya --help carries the workflow rules that used to live only in the skill', async () => {
+    const { main } = await import('../src/cli.js');
+    const lines = [];
+    const original = console.log;
+    console.log = (value) => lines.push(String(value));
+    try { await main(['--help']); } finally { console.log = original; }
+    const text = lines.join('\n');
+    // the rules an agent most often breaks must be discoverable from the CLI
+    expect(text).toContain('kaya poll <file>');
+    expect(text).toContain('PUT THE PRINTED URL IN YOUR REPLY');
+    expect(text).toContain('Answer IN Kaya, not in your own chat');
+    expect(text).toContain('Address EVERY item');
+    expect(text).toContain('One poll at a time');
+    expect(text).toContain('held: N staged');
+    expect(text).toContain('browser_disconnected');
+    expect(text).toContain('DELEGATING');
+    expect(text).toContain('data-kaya-ask');
+    // and the two claims that were wrong in the skill file are stated correctly
+    expect(text).toContain('There is no idle auto-stop');
+    expect(text).toContain('stops EVERY session on the machine');
   });
 });
