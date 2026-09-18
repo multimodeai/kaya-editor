@@ -49,7 +49,7 @@ export const OVERLAY_SCRIPT = `
   const pop = document.createElement('div'); pop.id='kaya-pop';
   pop.innerHTML = '<div class="kaya-pop-head" data-pop-head></div>'
     + '<textarea data-pop-input placeholder="Tell the agent what to change here..."></textarea>'
-    + '<div class="kaya-pop-hint">Enter to queue \\u00b7 \\u2318 + Enter to send now</div>'
+    + '<div class="kaya-pop-hint">Enter to queue \\u00b7 \\u2318 + Enter to send now \\u00b7 paste an image to attach it<span data-pop-att></span></div>'
     + '<div class="kaya-pop-actions"><button class="kaya-pop-cancel" data-pop-cancel>Cancel</button><button class="kaya-pop-queue" data-kaya-queue data-pop-queue>Queue</button></div>';
 
   const convo = document.createElement('aside'); convo.id='kaya-convo';
@@ -201,6 +201,7 @@ export const OVERLAY_SCRIPT = `
     state.ctx=ctx; state.ref=ref;
     popHead.innerHTML='Annotate <b>'+esc(ref)+'</b>';
     popInput.value='';
+    if(state.showAttachCount) state.showAttachCount();
     pop.classList.add('kaya-show');
     const pw=pop.offsetWidth||322, ph=pop.offsetHeight||190;
     let px=Math.min(x, window.innerWidth-pw-12); px=Math.max(12, px);
@@ -220,7 +221,8 @@ export const OVERLAY_SCRIPT = `
     const note=popInput.value.trim(); if(!note) return;
     const ctx=state.ctx||{};
     addQueued({ ref:state.ref, note:note, display:note, agentText:note, selector:ctx.selector, selectedText:ctx.selectedText,
-                anchorText:ctx.anchorText||null, anchorHash:ctx.anchorText?hashText(ctx.anchorText):null, anchorState:'ok' });
+                anchorText:ctx.anchorText||null, anchorHash:ctx.anchorText?hashText(ctx.anchorText):null, anchorState:'ok',
+                attachments:state.pendingAttachments.splice(0) });
     closePop();
     if(sendNow) send(false);
   }
@@ -280,7 +282,9 @@ export const OVERLAY_SCRIPT = `
       const st = it.anchorState||'ok';
       const badge = st==='stale' ? '<span class="kaya-pi-badge kaya-stale">anchor lost</span>'
                   : st==='moved' ? '<span class="kaya-pi-badge kaya-moved">re-anchored</span>' : '';
-      const ref = it.ref ? '<div class="kaya-pi-ref">'+esc(it.ref)+badge+'</div>' : badge;
+      const n=(it.attachments||[]).length;
+      const clip = n ? '<span class="kaya-pi-badge kaya-att">'+n+' image'+(n===1?'':'s')+'</span>' : '';
+      const ref = it.ref ? '<div class="kaya-pi-ref">'+esc(it.ref)+badge+clip+'</div>' : (badge+clip);
       return '<div class="kaya-pitem"><div class="kaya-pi-body">'+ref+'<div class="kaya-pi-note">'+esc(it.display||it.note||'')+'</div></div><span class="kaya-pi-x" data-i="'+i+'">\\u00d7</span></div>';
     }).join('');
   }
@@ -314,6 +318,55 @@ export const OVERLAY_SCRIPT = `
   // for one flaky request to silently drop every item queued behind it while the
   // UI had already cleared them - this way a failure leaves state.queued
   // untouched, so nothing typed is ever lost and the user can just retry.
+  // ---- pasted images ----
+  // "it looks wrong here" plus a screenshot beats a paragraph describing it.
+  // Uploaded as soon as it is pasted so the note carries a local path the agent
+  // can just open, rather than base64 riding inside the feedback text.
+  function attachmentsFrom(e){
+    const out=[]; const items=(e.clipboardData&&e.clipboardData.items)||(e.dataTransfer&&e.dataTransfer.items)||[];
+    for(let i=0;i<items.length;i++){
+      if(items[i].kind!=='file') continue;
+      const f=items[i].getAsFile();
+      if(f && /^image\\//.test(f.type)) out.push(f);
+    }
+    return out;
+  }
+  function readAsBase64(file){
+    return new Promise(function(res){
+      const r=new FileReader();
+      r.onload=function(){ const s=String(r.result||''); res(s.slice(s.indexOf(',')+1)); };
+      r.onerror=function(){ res(null); };
+      r.readAsDataURL(file);
+    });
+  }
+  async function uploadAttachment(file){
+    const data=await readAsBase64(file); if(!data) return null;
+    try{
+      const r=await fetch(base+'/attach',{method:'POST',headers:{'content-type':'application/json'},
+        body:JSON.stringify({ mime:file.type, name:file.name||'pasted', data:data })});
+      if(!r.ok) return null;
+      return await r.json();
+    }catch(_e){ return null; }
+  }
+  // Pending uploads for the note being written right now, moved onto the item
+  // when it is queued.
+  state.pendingAttachments=[];
+  function wireAttach(el, badge){
+    if(!el) return;
+    const take=async function(e){
+      const files=attachmentsFrom(e); if(!files.length) return;
+      e.preventDefault();
+      for(let i=0;i<files.length && state.pendingAttachments.length<10;i++){
+        const a=await uploadAttachment(files[i]);
+        if(a && a.path){ state.pendingAttachments.push(a); }
+      }
+      if(badge) badge();
+    };
+    el.addEventListener('paste', take);
+    el.addEventListener('drop', take);
+    el.addEventListener('dragover', function(e){ if(attachmentsFrom(e).length||((e.dataTransfer||{}).types||[]).indexOf('Files')!==-1) e.preventDefault(); });
+  }
+
   // The artifact as rendered, with Kaya's own chrome stripped back out so the
   // agent gets the page under review rather than the reviewer's UI around it.
   function domSnapshot(){
@@ -327,14 +380,14 @@ export const OVERLAY_SCRIPT = `
   }
   async function send(endAfter){
     const msg=composerInput.value.trim();
-    if(msg){ state.queued.push({ ref:null, note:msg, display:msg, agentText:msg }); composerInput.value=''; renderPending(); }
+    if(msg){ state.queued.push({ ref:null, note:msg, display:msg, agentText:msg, attachments:state.pendingAttachments.splice(0) }); composerInput.value=''; renderPending(); }
     if(!state.queued.length && !endAfter) return true;
     sendBtn.disabled=true; endBtn.disabled=true;
     const items=state.queued.map(function(it){
       // A stale anchor means the location reference cannot be trusted: say so
       // rather than let the agent act on a pointer that no longer resolves.
       const outText = it.anchorState==='stale' ? '[stale] '+it.agentText : it.agentText;
-      return { text: outText, tag:'comment', selector: it.selector, selectedText: it.selectedText, ref: it.ref||null };
+      return { text: outText, tag:'comment', selector: it.selector, selectedText: it.selectedText, ref: it.ref||null, attachments: it.attachments||[] };
     });
     let ok=false;
     const post=function(snapshot){
@@ -371,6 +424,17 @@ export const OVERLAY_SCRIPT = `
     if(v.draft && composerInput && !composerInput.value){ composerInput.value=v.draft; }
   })();
   if(composerInput){ composerInput.addEventListener('input', saveStage); }
+  (function wirePasteTargets(){
+    const popAtt=pop.querySelector('[data-pop-att]');
+    const show=function(){
+      const n=state.pendingAttachments.length;
+      if(popAtt) popAtt.textContent = n ? ' \\u00b7 ' + n + ' image' + (n===1?'':'s') + ' attached' : '';
+      countEl.classList.toggle('kaya-on', state.queued.length>0 || n>0);
+    };
+    wireAttach(popInput, show);
+    wireAttach(composerInput, show);
+    state.showAttachCount=show;
+  })();
   // Last-resort guard: warn before leaving with unsent notes still staged.
   window.addEventListener('beforeunload', function(e){
     if(!state.queued.length || state.leaving) return;

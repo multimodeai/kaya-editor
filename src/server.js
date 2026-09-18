@@ -3,7 +3,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { injectOverlay, injectBaseTheme, injectTitle } from './overlay.js';
 import { injectFavicon } from './favicon.js';
-import { removeRegistry, writeRegistry, readHistory, writeHistory, listRegistries, writeSnapshot } from './registry.js';
+import { removeRegistry, writeRegistry, readHistory, writeHistory, listRegistries, writeSnapshot, writeAttachment } from './registry.js';
 import { injectMermaidRuntime, mermaidRuntime } from './mermaid.js';
 import { markdownDocument } from './markdown.js';
 import { inlineAssets } from './export.js';
@@ -23,6 +23,11 @@ const DISCONNECT_GRACE_MS = 15000;
 const WORKING_WINDOW_MS = 5 * 60 * 1000;
 const SWEEP_MS = 2000;
 const SNAPSHOT_CAP_BYTES = 2 * 1024 * 1024;
+const ATTACHMENT_CAP_BYTES = 5 * 1024 * 1024;
+const ATTACHMENT_TYPES = {
+  'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif',
+  'image/webp': 'webp', 'image/svg+xml': 'svg'
+};
 
 function json(response, status, value) {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
@@ -270,6 +275,23 @@ export class KayaReviewServer {
       response.end(`${feedback}${feedback ? '\n\n' : ''}session_ended: ${result.ended ? 'true' : 'false'}\n${heldLine}${snapshotLine}${disconnectedLines}${nextStepLine}`);
       return;
     }
+    // A screenshot pasted onto a note says in one image what a paragraph of
+    // "it looks wrong on my screen" cannot. Stored locally like everything else
+    // and handed to the agent as a path to open.
+    if (url.pathname === '/__kaya/attach' && request.method === 'POST') {
+      try {
+        const data = JSON.parse(await body(request));
+        const mime = String(data?.mime || '');
+        const extension = ATTACHMENT_TYPES[mime];
+        if (!extension) return json(response, 400, { error: 'unsupported attachment type' });
+        const bytes = Buffer.from(String(data.data || ''), 'base64');
+        if (!bytes.length) return json(response, 400, { error: 'empty attachment' });
+        if (bytes.length > ATTACHMENT_CAP_BYTES) return json(response, 400, { error: 'attachment too large' });
+        const path = writeAttachment(this.file, bytes, extension);
+        this.touch();
+        return json(response, 201, { path, name: typeof data.name === 'string' ? data.name : '' });
+      } catch (error) { return json(response, 400, { error: error instanceof Error ? error.message : 'invalid attachment' }); }
+    }
     if (url.pathname === '/__kaya/feedback' && request.method === 'POST') {
       try {
         const data = JSON.parse(await body(request));
@@ -283,8 +305,12 @@ export class KayaReviewServer {
         const prepared = [];
         for (const raw of rawItems) {
           if (!raw || typeof raw.text !== 'string' || !raw.text.trim()) return json(response, 400, { error: 'text is required' });
-          const item = { text: raw.text.trim(), tag: raw.tag || 'comment', selector: raw.selector || undefined, selectedText: raw.selectedText || undefined, createdAt: new Date().toISOString() };
-          item.rawText = `[${item.tag}]${item.selector ? ` ${item.selector}` : ''}${item.selectedText ? `\nSelected: ${item.selectedText}` : ''}\n${item.text}`;
+          const attached = Array.isArray(raw.attachments)
+            ? raw.attachments.filter((a) => a && typeof a.path === 'string').map((a) => a.path).slice(0, 10)
+            : [];
+          const item = { text: raw.text.trim(), tag: raw.tag || 'comment', selector: raw.selector || undefined, selectedText: raw.selectedText || undefined, attachments: attached, createdAt: new Date().toISOString() };
+          item.rawText = `[${item.tag}]${item.selector ? ` ${item.selector}` : ''}${item.selectedText ? `\nSelected: ${item.selectedText}` : ''}\n${item.text}`
+            + (attached.length ? `\nattached (open these): ${attached.join(' ')}` : '');
           prepared.push({ item, ref: raw.ref ?? item.selectedText ?? null });
         }
         for (const { item, ref } of prepared) {

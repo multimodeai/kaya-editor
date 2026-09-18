@@ -20,6 +20,15 @@ export function historyPath(file) { return join(registryDirectory(), `${keyFor(f
 
 export function snapshotPath(file) { return join(registryDirectory(), `${keyFor(file)}.snapshot.html`); }
 
+// Attachments live beside the other session state, named by the reviewed file so
+// two open reviews never collide, and are handed to the agent as local paths.
+export function writeAttachment(file, bytes, extension) {
+  const name = `${keyFor(file)}.att-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}.${extension}`;
+  const path = join(registryDirectory(), name);
+  writeFileSync(path, bytes);
+  return path;
+}
+
 export function writeSnapshot(file, html) {
   try { writeFileSync(snapshotPath(file), html); return snapshotPath(file); }
   catch (_error) { return undefined; }  // best-effort: a note is still worth delivering without it

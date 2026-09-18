@@ -123,6 +123,7 @@ html.kaya-annotate { cursor:crosshair; }
   text-transform:uppercase;padding:2px 7px;border-radius:99px;vertical-align:middle}
 .kaya-pi-badge.kaya-stale{background:rgba(212,104,90,.18);color:#e08a7a}
 .kaya-pi-badge.kaya-moved{background:rgba(224,170,78,.18);color:#e0aa4e}
+.kaya-pi-badge.kaya-att{background:rgba(111,191,139,.18);color:#6fbf8b}
 
 .kaya-overflowbtn{font:inherit;font-size:12px;padding:5px 11px;border-radius:99px;cursor:pointer;
   border:1px solid rgba(224,170,78,.5);background:rgba(224,170,78,.14);color:#e0aa4e;margin-right:10px}

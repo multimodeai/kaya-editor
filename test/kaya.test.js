@@ -261,6 +261,48 @@ describe('Kaya HTTP review server', () => {
     expect(pollText).not.toContain('dom_snapshot:');
   });
 
+  it('stores a pasted image and hands the agent a local path to open', async () => {
+    const { file } = fixture();
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAFUlEQVR42mP8z8BQz0AEYBxVSF+FABJADveWkH6oAAAAAElFTkSuQmCC';
+    const attached = await fetch(`${server.address()}__kaya/attach`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mime: 'image/png', name: 'shot.png', data: png })
+    });
+    expect(attached.status).toBe(201);
+    const { path } = await attached.json();
+    expect(readFileSync(path).length).toBeGreaterThan(0);
+
+    await fetch(`${server.address()}__kaya/feedback`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ items: [{ text: 'looks like this', attachments: [{ path }] }] })
+    });
+    const pollText = await (await fetch(`${server.address()}__kaya/poll`)).text();
+    expect(pollText).toContain('attached (open these):');
+    expect(pollText).toContain(path);
+  });
+
+  it('refuses attachment types that are not images', async () => {
+    const { file } = fixture();
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+
+    for (const mime of ['application/x-sh', 'text/html', 'application/octet-stream']) {
+      const response = await fetch(`${server.address()}__kaya/attach`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ mime, data: Buffer.from('payload').toString('base64') })
+      });
+      expect(response.status).toBe(400);
+    }
+  });
+
   it('a bare Send & End with nothing queued still ends the session', async () => {
     const { file } = fixture();
     const server = new KayaReviewServer(file);
