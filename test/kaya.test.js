@@ -168,6 +168,63 @@ describe('Kaya HTTP review server', () => {
     expect(endedPoll).not.toContain('next_step:');
   });
 
+  it('reports agent presence so the reviewer can tell listening apart from nobody home', async () => {
+    const { file } = fixture();
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+
+    const state = async () => (await (await fetch(`${server.address()}__kaya/state?client=c1`)).json()).presence;
+    expect(await state()).toBe('waiting');          // nothing has ever polled
+
+    const polling = fetch(`${server.address()}__kaya/poll`);
+    await new Promise((r) => setTimeout(r, 40));
+    expect(await state()).toBe('listening');        // a poll is attached
+
+    await fetch(`${server.address()}__kaya/feedback`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ items: [{ text: 'a note' }] })
+    });
+    await polling;
+    expect(await state()).toBe('working');          // took the feedback, gone to act
+  });
+
+  it('regression: a closed review window wakes the poll instead of hanging on a dead tab', async () => {
+    const { file } = fixture();
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+
+    // a browser was here, then stopped heartbeating
+    await fetch(`${server.address()}__kaya/state?client=c1`);
+    server.lastClientAt = Date.now() - 60000;
+    server.clients.clear();
+
+    const polling = fetch(`${server.address()}__kaya/poll`);
+    await new Promise((r) => setTimeout(r, 40));
+    server.sweepClients();
+    const text = await (await polling).text();
+    expect(text).toContain('browser_disconnected: true');
+    expect(text).toContain('Ask the user whether to reopen it or end it');
+    expect(text).toContain('session_ended: false');   // disconnected is NOT ended
+
+    // and a re-poll answers at once rather than hanging again
+    expect(await (await fetch(`${server.address()}__kaya/poll`)).text()).toContain('browser_disconnected: true');
+  });
+
+  it('a reload inside the grace period is not treated as a disconnect', async () => {
+    const { file } = fixture();
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+
+    await fetch(`${server.address()}__kaya/state?client=c1`);
+    server.clients.clear();            // mid-reload: heartbeat gone, but only just
+    server.sweepClients();
+    expect(server.disconnected).toBe(false);
+  });
+
   it('a bare Send & End with nothing queued still ends the session', async () => {
     const { file } = fixture();
     const server = new KayaReviewServer(file);

@@ -103,7 +103,10 @@ async function poll(file, agentReply) {
     replySent = true;
     const feedback = text.replace(/session_ended:[\s\S]*$/, '').trim();
     const ended = /session_ended:\s*true/.test(text);
-    if (feedback || ended) { process.stdout.write(text); return; }
+    // A disconnected review window must break the loop too. Without this the
+    // keep-alive cycle would spin tightly against a tab that is already closed.
+    const disconnected = /browser_disconnected:\s*true/.test(text);
+    if (feedback || ended || disconnected) { process.stdout.write(text); return; }
   }
 }
 

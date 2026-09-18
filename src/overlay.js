@@ -53,7 +53,8 @@ export const OVERLAY_SCRIPT = `
     + '<div class="kaya-pop-actions"><button class="kaya-pop-cancel" data-pop-cancel>Cancel</button><button class="kaya-pop-queue" data-kaya-queue data-pop-queue>Queue</button></div>';
 
   const convo = document.createElement('aside'); convo.id='kaya-convo';
-  convo.innerHTML = '<div class="kaya-convo-head"><span class="kaya-convo-title">Conversation</span><span class="kaya-count" data-count>0</span></div>'
+  convo.innerHTML = '<div class="kaya-convo-head"><span class="kaya-convo-title">Conversation</span><span class="kaya-presence" data-presence></span><span class="kaya-count" data-count>0</span></div>'
+    + '<div class="kaya-nolisten" data-nolisten>No agent is listening. Anything you send now waits in the queue until one polls - ask your agent to run <b>kaya poll</b>.</div>'
     + '<div class="kaya-log" data-log data-kaya-reply></div>'
     + '<div class="kaya-pending" data-pending></div>'
     + '<div class="kaya-otherbanner" data-otherbanner>This review is open in another tab. <button data-takeover>Take over here</button></div>'
@@ -65,6 +66,7 @@ export const OVERLAY_SCRIPT = `
 
   const q = function(sel,r){ return (r||convo).querySelector(sel); };
   const logEl = q('[data-log]'); const composerInput = q('[data-input]'); const pendingEl = q('[data-pending]'); const countEl = q('[data-count]');
+  const presenceEl = q('[data-presence]'); const noListenEl = q('[data-nolisten]');
   const annBox = nav.querySelector('[data-kaya-annotate]');
   const overflowBtn = nav.querySelector('[data-overflow]');
   if(overflowBtn) overflowBtn.addEventListener('click', cycleOverflow);
@@ -284,6 +286,16 @@ export const OVERLAY_SCRIPT = `
   }
   pendingEl.addEventListener('click', function(e){ const i=e.target && e.target.getAttribute && e.target.getAttribute('data-i'); if(i!=null){ state.queued.splice(Number(i),1); renderPending(); } });
 
+  // Whether an agent is actually listening is invisible otherwise: the panel
+  // looks identical when one is polling and when nothing is attached at all, so
+  // notes get written into a queue nobody is draining.
+  function renderPresence(p){
+    if(!presenceEl) return;
+    const listening = p==='listening', working = p==='working';
+    presenceEl.textContent = listening ? 'Agent listening' : working ? 'Agent working' : 'No agent listening';
+    presenceEl.className = 'kaya-presence' + (listening ? ' kaya-live' : working ? ' kaya-busy' : ' kaya-off');
+    if(noListenEl) noListenEl.classList.toggle('kaya-show', p==='waiting' && !state.ended);
+  }
   let historyKey='';
   function renderHistory(hist){
     const key=hist.length+':'+(hist.length?(hist[hist.length-1].text||'').length:0);
@@ -629,6 +641,7 @@ export const OVERLAY_SCRIPT = `
   async function refresh(){
     try{ const r=await fetch(base+'/state?client='+clientId+'&staged='+state.queued.length); if(!r.ok) return; const d=await r.json();
       renderHistory(d.history||[]);
+      renderPresence(d.presence);
       state.ended=Boolean(d.ended); applyEnded();
       bannerEl.classList.toggle('kaya-show', (d.clients||1) > 1 && !!d.primary && d.primary!==clientId);
       // The agent rewrote the artifact on disk -> reload so the body reflects it

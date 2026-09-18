@@ -16,6 +16,13 @@ const MIME_TYPES = {
   '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.html': 'text/html; charset=utf-8'
 };
 
+const CLIENT_STALE_MS = 6000;
+// A reload drops the heartbeat for about a second, so the disconnect signal has
+// to wait longer than that before calling a tab gone.
+const DISCONNECT_GRACE_MS = 15000;
+const WORKING_WINDOW_MS = 5 * 60 * 1000;
+const SWEEP_MS = 2000;
+
 function json(response, status, value) {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
   response.end(JSON.stringify(value));
@@ -53,6 +60,14 @@ export class KayaReviewServer {
     this.staged = new Map();
     this.clients = new Map();
     this.primary = null;
+    // Presence: the reviewer cannot otherwise tell a listening agent apart from
+    // no agent at all - the panel looks identical either way, so notes get typed
+    // into a void and only discovered as lost much later.
+    this.lastWaiterAt = 0;
+    this.browserSeen = false;
+    this.lastClientAt = 0;
+    this.disconnected = false;
+    this.sweepTimer = undefined;
     // Restore prior conversation from disk so reopening (or restarting) a file
     // keeps every round and annotation instead of starting blank.
     this.history = readHistory(this.file);
@@ -62,6 +77,36 @@ export class KayaReviewServer {
   persistHistory() { writeHistory(this.file, this.history); }
   touch() { this.lastActivity = Date.now(); }
   stagedCount() { let n = 0; for (const v of this.staged.values()) n += v; return n; }
+
+  // listening: a poll is attached right now.
+  // working:   none attached, but one was recently - the agent took the feedback
+  //            and is presumably acting on it.
+  // waiting:   nothing is listening and nothing is coming back. This is the state
+  //            worth warning about, because anything sent now reaches nobody.
+  presence() {
+    if (this.waiters.size) return 'listening';
+    if (this.lastWaiterAt && Date.now() - this.lastWaiterAt < WORKING_WINDOW_MS) return 'working';
+    return 'waiting';
+  }
+
+  // Expire stale client heartbeats and, once every review window has been gone
+  // past the grace period, wake any attached poll instead of letting it hang on
+  // a tab that is not there. Runs on a timer because a closed browser sends no
+  // further requests, so nothing else would ever notice.
+  sweepClients() {
+    const now = Date.now();
+    for (const [id, t] of this.clients) if (now - t > CLIENT_STALE_MS) this.clients.delete(id);
+    for (const id of this.staged.keys()) if (!this.clients.has(id)) this.staged.delete(id);
+    if (this.clients.size) { this.disconnected = false; return; }
+    if (!this.browserSeen || this.ended) return;
+    if (now - this.lastClientAt < DISCONNECT_GRACE_MS) return;  // a reload is not a disconnect
+    this.disconnected = true;
+    if (this.waiters.size) {
+      const result = { feedback: this.queue.splice(0), ended: this.ended, disconnected: true };
+      for (const waiter of this.waiters) waiter(result);
+      this.waiters.clear();
+    }
+  }
 
   fileMtime() { try { return statSync(this.file).mtimeMs; } catch (_error) { return 0; } }
 
@@ -74,6 +119,8 @@ export class KayaReviewServer {
       this.server.listen(this.port, this.host, () => {
         this.server.off('error', rejectStart);
         this.port = this.server.address().port;
+        this.sweepTimer = setInterval(() => this.sweepClients(), SWEEP_MS);
+        if (this.sweepTimer.unref) this.sweepTimer.unref();
         resolveStart(this);
       });
     });
@@ -84,6 +131,7 @@ export class KayaReviewServer {
   async close() {
     for (const waiter of this.waiters) waiter({ feedback: [], ended: true });
     this.waiters.clear();
+    if (this.sweepTimer) { clearInterval(this.sweepTimer); this.sweepTimer = undefined; }
     if (!this.server) return;
     await new Promise((resolveClose) => this.server.close(() => resolveClose()));
     this.server = undefined;
@@ -107,7 +155,11 @@ export class KayaReviewServer {
       this.touch();
     }
     if (typeof agentReply === 'string') this.agentReply = agentReply;
+    this.lastWaiterAt = Date.now();
     if (this.queue.length || this.ended) return Promise.resolve({ feedback: this.queue.splice(0), ended: this.ended });
+    // Already known gone: answer at once rather than holding the agent on a tab
+    // that is not coming back. The next_step tells it to ask rather than re-poll.
+    if (this.disconnected) return Promise.resolve({ feedback: [], ended: this.ended, disconnected: true });
     return new Promise((resolvePoll) => {
       this.waiters.add(resolvePoll);
       // Bounded long-poll: resolve with an empty keep-alive well inside the
@@ -158,7 +210,12 @@ export class KayaReviewServer {
     if (url.pathname === '/__kaya/state' && request.method === 'GET') {
       const now = Date.now();
       const cid = url.searchParams.get('client');
-      if (cid) this.clients.set(cid, now);
+      if (cid) {
+        this.clients.set(cid, now);
+        this.browserSeen = true;
+        this.lastClientAt = now;
+        this.disconnected = false;
+      }
       // Clients report unsent staged notes on the refresh they already make, so a
       // held session costs no extra endpoint and no extra timer.
       if (cid) {
@@ -166,9 +223,9 @@ export class KayaReviewServer {
         this.staged.set(cid, Number.isFinite(n) && n > 0 ? n : 0);
       }
       for (const id of this.staged.keys()) if (!this.clients.has(id)) this.staged.delete(id);
-      for (const [id, t] of this.clients) if (now - t > 6000) this.clients.delete(id);
+      for (const [id, t] of this.clients) if (now - t > CLIENT_STALE_MS) this.clients.delete(id);
       if (!this.primary || !this.clients.has(this.primary)) this.primary = this.clients.keys().next().value || null;
-      return json(response, 200, { agentReply: this.agentReply, ended: this.ended, queued: this.queue.length, clients: this.clients.size, primary: this.primary, history: this.history, fileMtime: this.fileMtime(), staged: this.stagedCount(), endedBy: this.endedBy });
+      return json(response, 200, { agentReply: this.agentReply, ended: this.ended, queued: this.queue.length, clients: this.clients.size, primary: this.primary, history: this.history, fileMtime: this.fileMtime(), staged: this.stagedCount(), endedBy: this.endedBy, presence: this.presence() });
     }
     if (url.pathname === '/__kaya/claim' && request.method === 'POST') {
       const cid = url.searchParams.get('client');
@@ -194,9 +251,15 @@ export class KayaReviewServer {
       // that guidance - the same incident showed an agent answering fully in
       // its own chat/terminal instead of writing the reply back into Kaya.
       const nextStepLine = feedback && !result.ended
-        ? `next_step: address every numbered item above, apply the changes, then run \`kaya poll <file> --agent-reply "<what changed>"\` again BEFORE replying to the user anywhere else. Do not answer outside Kaya while this review is open.\n`
+        ? `next_step: address every numbered item above, apply the changes, then run \`kaya poll <file> --agent-reply "<what changed>"\` again BEFORE replying to the user anywhere else. Do not answer outside Kaya while this review is open. Poll delivery consumes the response, so read it completely.\n`
         : '';
-      response.end(`${feedback}${feedback ? '\n\n' : ''}session_ended: ${result.ended ? 'true' : 'false'}\n${heldLine}${nextStepLine}`);
+      // A closed review window is not the same as an ended review: the session is
+      // still resumable, so hand that decision to the user rather than reopening
+      // or ending anything unasked.
+      const disconnectedLines = result.disconnected && !result.ended
+        ? 'browser_disconnected: true\nnext_step: the review window was closed or disconnected. The session is still open and resumable. Ask the user whether to reopen it or end it, and do neither uninvited. Do not keep polling in a loop while it is disconnected.\n'
+        : '';
+      response.end(`${feedback}${feedback ? '\n\n' : ''}session_ended: ${result.ended ? 'true' : 'false'}\n${heldLine}${disconnectedLines}${nextStepLine}`);
       return;
     }
     if (url.pathname === '/__kaya/feedback' && request.method === 'POST') {
