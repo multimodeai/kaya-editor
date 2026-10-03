@@ -12,7 +12,7 @@ import { VERSION } from './version.js';
 
 const cliFile = fileURLToPath(import.meta.url);
 const DESCRIPTION = 'Local review surface for agent-written HTML and Markdown: open it, let the human annotate, poll for their notes';
-const COMMANDS = ['open', 'poll', 'list', 'end', 'export', 'stop', 'setup'];
+const COMMANDS = ['open', 'poll', 'reply', 'list', 'end', 'export', 'stop', 'setup'];
 
 // ---- argument handling -------------------------------------------------------
 
@@ -55,7 +55,8 @@ function usage(command, message) {
 
 const SPECS = {
   open: { usage: 'kaya open <file> [--reopen] [--no-open]', flags: { '--reopen': 'boolean', '--no-open': 'boolean' }, min: 1, argName: 'an artifact file' },
-  poll: { usage: 'kaya poll <file> [--agent-reply "<message>"]', flags: { '--agent-reply': 'string' }, min: 1, argName: 'an artifact file' },
+  poll: { usage: 'kaya poll <file> [--agent-reply "<message>"] [--receipt "n1=addressed: ..."]', flags: { '--agent-reply': 'string', '--receipt': 'string' }, min: 1, argName: 'an artifact file' },
+  reply: { usage: 'kaya reply <file> --agent-reply "<message>" [--receipt "n1=addressed: ..."]', flags: { '--agent-reply': 'string', '--receipt': 'string' }, min: 1, argName: 'an artifact file' },
   list: { usage: 'kaya list', flags: {} },
   end: { usage: 'kaya end <file>', flags: {}, min: 1, argName: 'an artifact file' },
   export: { usage: 'kaya export <file> [--out <path>]', flags: { '--out': 'string' }, min: 1, argName: 'an artifact file' },
@@ -73,6 +74,26 @@ function normalizeArgv(argv) {
 }
 
 function isArtifactPath(arg) { return /\.(html?|md|markdown)$/i.test(arg); }
+
+// "n1=addressed: changed the title; n2=deferred: needs real figures"
+// Each delivered note has an id; a receipt gives every one an outcome, so a
+// reply cannot quietly cover the first note of a batch and skip the rest.
+const OUTCOMES = ['addressed', 'deferred', 'rejected'];
+function parseReceipt(command, text) {
+  if (text === undefined) return [];
+  const entries = [];
+  for (const part of text.split(';').map((p) => p.trim()).filter(Boolean)) {
+    const m = part.match(/^(n\d+)\s*=\s*([a-z]+)\s*(?::\s*(.*))?$/i);
+    if (!m || !OUTCOMES.includes(m[2].toLowerCase())) {
+      throw new AxiError(`cannot read receipt entry "${part}"`, 'VALIDATION_ERROR', [
+        'format: --receipt "n1=addressed: what you did; n2=deferred: why; n3=rejected: why"',
+        `outcomes: ${OUTCOMES.join(', ')}`,
+      ]);
+    }
+    entries.push({ id: m[1].toLowerCase(), outcome: m[2].toLowerCase(), note: (m[3] || '').trim() || undefined });
+  }
+  return entries;
+}
 
 // ---- talking to a session ----------------------------------------------------
 // Every review is served by one shared process on a fixed port at /s/<key>/, so
@@ -278,12 +299,16 @@ function userEnded(target) {
 // "answered only the first annotation" happened.
 function feedbackOutput(target, d) {
   const n = d.feedback.length;
-  const status = d.ended ? `ended by ${d.endedBy || 'the user'}` : d.disconnected ? 'review window disconnected' : 'feedback';
+  const status = d.superseded ? 'superseded by a newer poll' : d.ended ? `ended by ${d.endedBy || 'the user'}` : d.disconnected ? 'review window disconnected' : 'feedback';
   const out = { poll: { file: display(target), status, items: n } };
   if (d.held > 0) out.poll.held = d.held;
+  if (d.superseded) {
+    out.next_step = `Stop this poll: a newer poll for ${display(target)} is now listening, and two polls on one review would each get a copy of every note.`;
+    return out;
+  }
   if (n) {
     out.feedback = d.feedback.map((item, i) => {
-      const row = { item: `${i + 1}/${n}`, tag: item.tag };
+      const row = { id: item.id || `${i + 1}`, item: `${i + 1}/${n}`, tag: item.tag };
       if (item.selector) row.selector = item.selector;
       if (item.selected) row.selected = item.selected;
       row.note = item.note;
@@ -291,6 +316,8 @@ function feedbackOutput(target, d) {
       return row;
     });
   }
+  // Notes delivered in an earlier round that no reply has accounted for yet.
+  if (d.unaccounted?.length) out.unaccounted = d.unaccounted;
   if (d.snapshot) out.dom_snapshot = `${d.snapshot} (the page as rendered when these notes were written; open it only if a note is unclear without it)`;
   const f = display(target);
   if (d.ended) {
@@ -300,7 +327,9 @@ function feedbackOutput(target, d) {
   } else if (d.disconnected) {
     out.next_step = 'The review window was closed or disconnected. The session is still open and resumable. Ask the user whether to reopen it or end it, and do neither uninvited. Do not keep polling in a loop while it is disconnected.';
   } else {
-    out.next_step = `${n === 1 ? 'Address the item above' : `Address every one of the ${n} items above`}, apply the changes to ${f}, then run \`kaya poll ${f} --agent-reply "<what changed>"\` BEFORE replying to the user anywhere else. Do not answer outside Kaya while this review is open. Poll delivery consumes the response, so read it completely.`;
+    const ids = [...(d.unaccounted || []), ...d.feedback.map((item) => item.id).filter(Boolean)];
+    const example = ids.slice(0, 2).map((id, i) => `${id}=${i === 0 ? 'addressed' : 'deferred'}: <${i === 0 ? 'what you did' : 'why'}>`).join('; ');
+    out.next_step = `${n === 1 ? 'Address the item above' : `Address every one of the ${n} items above`}${d.unaccounted?.length ? `, plus ${d.unaccounted.join(', ')} still unaccounted for from earlier` : ''}, apply the changes to ${f}, then run \`kaya poll ${f} --agent-reply "<what changed>" --receipt "${example}"\` BEFORE replying to the user anywhere else. The receipt must give every id (${ids.join(', ')}) an outcome: addressed, deferred or rejected. Do not answer outside Kaya while this review is open. Poll delivery consumes the response, so read it completely.`;
     if (d.held > 0) out.next_step += ` The user also has ${d.held} note${d.held === 1 ? '' : 's'} typed but not sent; those arrive only when they press Send.`;
   }
   return out;
@@ -309,6 +338,7 @@ function feedbackOutput(target, d) {
 async function poll(args) {
   const { flags, positionals } = parse('poll', args, SPECS.poll);
   const target = resolve(positionals[0]);
+  const receipt = parseReceipt('poll', flags['--receipt']);
   // An agent working a review is exactly when it should be on current code, and
   // this also starts the shared server if it stopped itself while idle.
   if (!(await legacyOrigin(target))) { try { await ensureDaemon(); } catch (_error) { /* surfaces as no live review below */ } }
@@ -319,6 +349,7 @@ async function poll(args) {
   for (;;) {
     const params = new URLSearchParams({ format: 'json' });
     if (!replySent && flags['--agent-reply']) params.set('agent_reply', flags['--agent-reply']);
+    if (!replySent && receipt.length) params.set('receipt', JSON.stringify(receipt));
     let response;
     try { response = await requestTo(target, `/__kaya/poll?${params}`); }
     catch (error) {
@@ -338,7 +369,7 @@ async function poll(args) {
       continue;
     }
     const delivery = await response.json();
-    if (delivery.feedback.length || delivery.ended || delivery.disconnected) return feedbackOutput(target, delivery);
+    if (delivery.feedback.length || delivery.ended || delivery.disconnected || delivery.superseded) return feedbackOutput(target, delivery);
   }
 }
 
@@ -349,6 +380,30 @@ async function reconnect(target) {
   const origin = daemonOrigin();
   try { const r = await fetch(`${origin}/s/${urlKeyFor(target)}/__kaya/health`, { signal: AbortSignal.timeout(PROBE_MS) }); return r.ok; }
   catch (_error) { return false; }
+}
+
+async function reply(args) {
+  const { flags, positionals } = parse('reply', args, SPECS.reply);
+  const target = resolve(positionals[0]);
+  const receipt = parseReceipt('reply', flags['--receipt']);
+  if (!flags['--agent-reply'] && !receipt.length) throw usage('reply', '`reply` needs --agent-reply, --receipt, or both');
+  const response = await requestTo(target, '/__kaya/reply', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: flags['--agent-reply'] || '', receipt }),
+    timeoutMs: 5000,
+  });
+  const r = await response.json();
+  const f = display(target);
+  const out = { reply: { file: f, accepted: true } };
+  if (r.duplicate) out.reply.note = 'identical to the last reply, not added again (no-op)';
+  if (r.accounted.length) out.reply.accounted = r.accounted;
+  if (r.unaccounted.length) {
+    out.unaccounted = r.unaccounted;
+    out.next_step = `Notes ${r.unaccounted.join(', ')} were delivered but no reply has accounted for them. Give each an outcome with \`kaya reply ${f} --receipt "${r.unaccounted[0]}=addressed: <what you did>"\`.`;
+  } else {
+    out.help = [`Run \`kaya poll ${f}\` to wait for the user's response`];
+  }
+  return out;
 }
 
 async function end(args) {
@@ -475,6 +530,7 @@ description: ${DESCRIPTION}
 commands:
   open <file> [--reopen] [--no-open]  Open or resume a review; prints its URL. \`kaya <file>\` is the same
   poll <file> [--agent-reply MSG]     Block until the user sends notes, ends the review, or closes it
+  reply <file> --agent-reply MSG      Hand a result back without waiting; prints an acceptance receipt
   list                                Every live review on this machine
   end <file>                          End a review as the agent
   export <file> [--out PATH]          Portable single file with local assets inlined
@@ -497,9 +553,10 @@ the loop:
 rules that are easy to get wrong:
   Answer IN Kaya, not in your own chat. While a review is open, a reply the user only
   sees in your terminal did not reach the review they are reading.
-  Address EVERY item. A poll lists each note as item n/N. Each is a separate thing to
-  act on. Delivery is destructive, so read the whole response - nothing redelivers it.
-  One poll at a time per file. Concurrent polls all receive a copy of the same batch.
+  Address EVERY item. Each note has an id (n1, n2, ...). Your next reply must carry a
+  --receipt giving every id an outcome - addressed, deferred or rejected - and any you
+  skip are named back to you. Delivery is destructive: read the whole response.
+  One poll per review. A newer poll retires an older one, which is told to stop.
   Do not re-run open after editing the artifact. The open tab live-reloads.
   "held" counts notes the user has typed but NOT sent. They arrive only on Send.
   "review window disconnected" means the tab was closed. The review is still resumable:
@@ -534,12 +591,20 @@ const COMMAND_HELP = {
 examples:
   kaya open .kaya/plan.html
   kaya .kaya/spec.md --no-open`,
-  poll: `usage: kaya poll <file> [--agent-reply "<message>"]
+  poll: `usage: kaya poll <file> [--agent-reply "<message>"] [--receipt "<id>=<outcome>: <note>; ..."]
   Blocks until the user sends notes, ends the review, or closes the window.
+  Only one poll listens per review; a newer one retires this one.
   --agent-reply   shown to the user in the review before waiting again
+  --receipt       an outcome for every delivered note: addressed, deferred or rejected
 examples:
   kaya poll .kaya/plan.html --agent-reply "Plan is up; start with the risks section"
-  kaya poll .kaya/plan.html --agent-reply "Applied all 3 notes; the table now sorts by cost"`,
+  kaya poll .kaya/plan.html --agent-reply "Applied your notes" --receipt "n1=addressed: warmer title; n2=deferred: needs Q3 figures"`,
+  reply: `usage: kaya reply <file> --agent-reply "<message>" [--receipt "<id>=<outcome>: <note>; ..."]
+  Shows a reply in the review and exits once the server accepts it, without waiting
+  for more feedback. Use poll instead when you want to keep listening.
+  Names any delivered notes no reply has accounted for yet.
+example:
+  kaya reply .kaya/plan.html --agent-reply "Done - final version is up" --receipt "n3=addressed: cut the repeat"`,
   list: `usage: kaya list
   Every live review on this machine, newest first, with its URL.`,
   end: `usage: kaya end <file>
@@ -593,7 +658,7 @@ export async function main(argv) {
     argv: normalizeArgv(argv),
     topLevelHelp: TOP_LEVEL_HELP,
     home,
-    commands: { open, poll, list, end, export: exportCommand, stop, setup },
+    commands: { open, poll, reply, list, end, export: exportCommand, stop, setup },
     getCommandHelp: (command) => COMMAND_HELP[command] || null,
   });
 }

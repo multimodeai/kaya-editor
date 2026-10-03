@@ -97,6 +97,11 @@ export class ReviewSession {
     this.onStop = options.onStop;
     this.queue = [];
     this.waiters = new Set();
+    // Every note gets a short id (n1, n2, ...) so an agent's reply can account
+    // for each one. Delivered ids stay outstanding until a receipt covers them.
+    this.seq = 0;
+    this.outstanding = new Set();
+    this.lastReplyAt = 0;
     this.agentReply = '';
     this.ended = false;
     this.endedBy = null;
@@ -123,6 +128,8 @@ export class ReviewSession {
         this.endedBy = saved.endedBy || null;
         this.queue = Array.isArray(saved.queue) ? saved.queue : [];
         this.snapshot = saved.snapshot || undefined;
+        this.seq = Number(saved.seq) || 0;
+        this.outstanding = new Set(Array.isArray(saved.outstanding) ? saved.outstanding : []);
       }
     }
   }
@@ -132,7 +139,10 @@ export class ReviewSession {
   // reopens an ended review nor drops notes that had not reached an agent yet.
   persistState() {
     if (!this.persist) return;
-    writeSessionState(this.file, { ended: this.ended, endedBy: this.endedBy, queue: this.queue, snapshot: this.snapshot || null });
+    writeSessionState(this.file, {
+      ended: this.ended, endedBy: this.endedBy, queue: this.queue, snapshot: this.snapshot || null,
+      seq: this.seq, outstanding: [...this.outstanding],
+    });
   }
   touch() { this.lastActivity = Date.now(); }
   stagedCount() { let n = 0; for (const v of this.staged.values()) n += (v && v.n) || 0; return n; }
@@ -144,6 +154,9 @@ export class ReviewSession {
   //            worth warning about, because anything sent now reaches nobody.
   presence() {
     if (this.waiters.size) return 'listening';
+    // Handed a result back and deliberately not waiting: not a dead agent, so
+    // not worth the "nobody is listening" warning.
+    if (this.lastReplyAt && this.lastReplyAt >= this.lastWaiterAt) return 'replied';
     if (this.lastWaiterAt && Date.now() - this.lastWaiterAt < WORKING_WINDOW_MS) return 'working';
     return 'waiting';
   }
@@ -168,6 +181,28 @@ export class ReviewSession {
     }
   }
 
+  // Record an agent's reply, plus a receipt that accounts for delivered notes by
+  // id. Returns which delivered notes are still unaccounted for, so an agent that
+  // answered only some of a batch is told exactly which ones it skipped.
+  recordReply(text, receipt = []) {
+    const accounted = [];
+    for (const entry of receipt) {
+      if (!entry || typeof entry.id !== 'string') continue;
+      if (this.outstanding.delete(entry.id)) accounted.push(entry);
+    }
+    const lines = accounted.map((e) => `[${e.outcome}] ${e.id}${e.note ? ` - ${e.note}` : ''}`);
+    const body = [text, ...lines].filter(Boolean).join('\n');
+    const duplicate = body === this.agentReply;
+    if (body && !duplicate) {
+      this.history.push({ role: 'agent', text: body });
+      this.persistHistory();
+      this.touch();
+    }
+    if (body) this.agentReply = body;
+    this.persistState();
+    return { duplicate, accounted: accounted.map((e) => e.id), unaccounted: [...this.outstanding] };
+  }
+
   // A summary of this review for listings, including the aggregates an agent
   // or a hook would otherwise need a second call for.
   describe() {
@@ -182,6 +217,7 @@ export class ReviewSession {
   // it attached to exactly the batch it was captured with.
   describeDelivery(result) {
     const feedback = result.feedback.map((item) => ({
+      id: item.id || null,
       tag: item.tag,
       selector: item.selector || null,
       selected: item.selectedText || null,
@@ -190,11 +226,15 @@ export class ReviewSession {
       rawText: item.rawText,
     }));
     const snapshot = feedback.length && this.snapshot ? this.snapshot : null;
+    for (const item of feedback) if (item.id) this.outstanding.add(item.id);
     if (feedback.length) { this.snapshot = undefined; this.persistState(); }
     return {
       ended: Boolean(result.ended),
       endedBy: this.endedBy,
       disconnected: Boolean(result.disconnected) && !result.ended,
+      superseded: Boolean(result.superseded),
+      restarting: Boolean(result.restarting),
+      unaccounted: [...this.outstanding].filter((id) => !feedback.some((f) => f.id === id)),
       held: this.clients.size > 0 ? this.stagedCount() : 0,
       snapshot,
       feedback,
@@ -232,14 +272,29 @@ export class ReviewSession {
     this.persistState();
   }
 
-  poll(agentReply) {
-    if (typeof agentReply === 'string' && agentReply && agentReply !== this.agentReply) {
-      this.history.push({ role: 'agent', text: agentReply });
-      this.persistHistory();
-      this.touch();
-    }
-    if (typeof agentReply === 'string') this.agentReply = agentReply;
+  // Put notes back at the front of the queue when their delivery never reached a
+  // live client, then hand them to whoever is listening now.
+  requeue(items) {
+    if (!items.length) return;
+    this.queue.unshift(...items);
+    for (const item of items) if (item.id) this.outstanding.delete(item.id);
+    this.persistState();
+    this.notify();
+  }
+
+  poll(agentReply, { receipt = [], exclusive = false, connection } = {}) {
+    if ((typeof agentReply === 'string' && agentReply) || receipt.length) this.recordReply(agentReply || '', receipt);
     this.lastWaiterAt = Date.now();
+    // One listener per review. A newer poll retires the older one, which is told
+    // it was superseded rather than also receiving the batch - concurrent polls
+    // used to each get a copy, and 25 of them once piled up on one review. Only
+    // polls that understand the signal take part, so two older clients can never
+    // ping-pong superseding each other.
+    if (exclusive && this.waiters.size) {
+      const retired = { feedback: [], ended: this.ended, superseded: true };
+      for (const waiter of this.waiters) waiter(retired);
+      this.waiters.clear();
+    }
     if (this.queue.length || this.ended) {
       const result = { feedback: this.queue.splice(0), ended: this.ended };
       this.persistState();
@@ -257,6 +312,14 @@ export class ReviewSession {
         if (this.waiters.delete(resolvePoll)) resolvePoll({ feedback: [], ended: this.ended });
       }, 25000);
       if (timer.unref) timer.unref();
+      // A poll whose client died (killed, crashed, Ctrl-C) must stop counting as
+      // a listener at once. Left registered, it took the next batch into a closed
+      // connection and no live poll ever saw those notes. It also showed the
+      // reviewer "Agent listening" when nothing was.
+      if (connection) {
+        connection.onClose = () => { if (this.waiters.delete(resolvePoll)) clearTimeout(timer); };
+        if (connection.closed) connection.onClose();
+      }
     });
   }
 
@@ -323,7 +386,26 @@ export class ReviewSession {
       return json(response, 200, { primary: this.primary });
     }
     if (url.pathname === '/__kaya/poll' && request.method === 'GET') {
-      const result = await this.poll(url.searchParams.get('agent_reply') || undefined);
+      let receipt = [];
+      try { receipt = JSON.parse(url.searchParams.get('receipt') || '[]'); } catch (_error) { return json(response, 400, { error: 'receipt is not valid JSON' }); }
+      const connection = { closed: false, onClose: null };
+      response.on('close', () => {
+        if (response.writableEnded) return;   // closed after we answered: normal
+        connection.closed = true;
+        connection.onClose?.();
+      });
+      const result = await this.poll(url.searchParams.get('agent_reply') || undefined, {
+        receipt: Array.isArray(receipt) ? receipt : [],
+        exclusive: url.searchParams.get('format') === 'json',
+        connection,
+      });
+      // Gone before we could answer: give anything meant for it back to the queue.
+      if (connection.closed) { this.requeue(result.feedback); return; }
+      // And if the answer is written but never flushes to a live socket, the
+      // notes come back too, so a vanished client can never swallow them.
+      if (result.feedback.length) {
+        response.on('close', () => { if (!response.writableFinished) this.requeue(result.feedback); });
+      }
       const delivery = this.describeDelivery(result);
       // The CLI asks for JSON and renders TOON with its own next steps. Anything
       // else gets the original plain text, so an older kaya binary polling a newer
@@ -332,6 +414,19 @@ export class ReviewSession {
       response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
       response.end(legacyPollText(delivery));
       return;
+    }
+    // Hand a result back without attaching a long-poll. The response is the
+    // acceptance receipt: the reply is in the conversation once this returns.
+    if (url.pathname === '/__kaya/reply' && request.method === 'POST') {
+      try {
+        const data = JSON.parse(await body(request));
+        const text = typeof data?.text === 'string' ? data.text.trim() : '';
+        const receipt = Array.isArray(data?.receipt) ? data.receipt : [];
+        if (!text && !receipt.length) return json(response, 400, { error: 'text or receipt is required' });
+        const outcome = this.recordReply(text, receipt);
+        this.lastReplyAt = Date.now();
+        return json(response, 200, { accepted: true, ...outcome, historyLen: this.history.length });
+      } catch (error) { return json(response, 400, { error: error instanceof Error ? error.message : 'invalid JSON' }); }
     }
     // A screenshot pasted onto a note says in one image what a paragraph of
     // "it looks wrong on my screen" cannot. Stored locally like everything else
@@ -366,14 +461,15 @@ export class ReviewSession {
           const attached = Array.isArray(raw.attachments)
             ? raw.attachments.filter((a) => a && typeof a.path === 'string').map((a) => a.path).slice(0, 10)
             : [];
-          const item = { text: raw.text.trim(), tag: raw.tag || 'comment', selector: raw.selector || undefined, selectedText: raw.selectedText || undefined, attachments: attached, createdAt: new Date().toISOString() };
+          const item = { id: null, text: raw.text.trim(), tag: raw.tag || 'comment', selector: raw.selector || undefined, selectedText: raw.selectedText || undefined, attachments: attached, createdAt: new Date().toISOString() };
           item.rawText = `[${item.tag}]${item.selector ? ` ${item.selector}` : ''}${item.selectedText ? `\nSelected: ${item.selectedText}` : ''}\n${item.text}`
             + (attached.length ? `\nattached (open these): ${attached.join(' ')}` : '');
           prepared.push({ item, ref: raw.ref ?? item.selectedText ?? null });
         }
         for (const { item, ref } of prepared) {
+          item.id = `n${++this.seq}`;
           this.queue.push(item);
-          this.history.push({ role: 'you', text: item.text, ref });
+          this.history.push({ role: 'you', id: item.id, text: item.text, ref });
         }
         if (endSession) { this.ended = true; this.endedBy = 'user'; }
         // Everything this client had queued went out in this batch, so its last

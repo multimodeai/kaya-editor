@@ -365,6 +365,28 @@ describe('Kaya HTTP review server', () => {
     expect(readFileSync(second, 'utf8')).toContain('SECOND STATE');
   });
 
+  it('regression: a poll whose client died never swallows the next batch', async () => {
+    // A killed poll used to stay registered for up to 25s; notes arriving then
+    // were delivered into its closed connection and no live poll ever saw them.
+    const { file } = fixture();
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+    const dead = new AbortController();
+    fetch(`${server.address()}__kaya/poll?format=json`, { signal: dead.signal }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 80));
+    dead.abort();
+    await new Promise((r) => setTimeout(r, 80));
+    expect(server.waiters.size).toBe(0);                 // no ghost listener, and no false "Agent listening"
+    await fetch(`${server.address()}__kaya/feedback`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ items: [{ text: 'sent after the poll died' }] })
+    });
+    expect(server.queue.length).toBe(1);
+    const d = await (await fetch(`${server.address()}__kaya/poll?format=json`)).json();
+    expect(d.feedback.map((f) => f.note)).toEqual(['sent after the poll died']);
+  });
+
   it('a bare Send & End with nothing queued still ends the session', async () => {
     const { file } = fixture();
     const server = new KayaReviewServer(file);
@@ -657,7 +679,8 @@ describe('guidance ships with the binary, not a skill file', () => {
     // the rules an agent most often breaks must be discoverable from the CLI
     for (const rule of [
       'kaya poll <file>', 'PUT THE PRINTED URL IN YOUR REPLY', 'Answer IN Kaya, not in your own chat',
-      'Address EVERY item', 'One poll at a time', '"held" counts notes', 'review window disconnected',
+      'Address EVERY item', 'One poll per review', 'A newer poll retires an older one', '--receipt',
+      '"held" counts notes', 'review window disconnected',
       'delegating:', 'data-kaya-ask',
       // the claim the skill file once got wrong, stated correctly
       'moves onto a newer kaya by itself', 'stopping refuses while the user has unsent notes',
@@ -855,5 +878,26 @@ describe('one shared server on a fixed port', () => {
     await new Promise((r) => setTimeout(r, 100));
     expect(idled).toBe(true);
     expect(daemon.server).toBeUndefined();
+  });
+});
+
+describe('the overlay script survives being embedded in a template literal', () => {
+  it('regression: no backslash escape is silently dropped from the served script', () => {
+    // The overlay ships inside a JS template literal, which drops the backslash
+    // in "\[" or "\d". A receipt regex once reached the browser as
+    // /^[(addressed...)] (nd+)/ - a character class that never matched - so
+    // outcomes rendered as plain text. Escapes must be doubled in the source.
+    const src = readFileSync(new URL('../src/overlay.js', import.meta.url), 'utf8');
+    const start = src.indexOf('export const OVERLAY_SCRIPT = `') + 'export const OVERLAY_SCRIPT = `'.length;
+    const body = src.slice(start, src.indexOf('`;', start));
+    const dropped = [...body.matchAll(/(?<!\\)\\([^\\u'"`$\n0bfnrtvx])/g)].map((m) => m[0]);
+    expect(dropped).toEqual([]);
+  });
+
+  it('receipt lines render with their outcome', async () => {
+    const { OVERLAY_SCRIPT } = await import('../src/overlay.js');
+    const pattern = OVERLAY_SCRIPT.match(/replace\((\/\^\\\[\(addressed\|deferred\|rejected\)[^,]+),/)[1];
+    const regex = new Function(`return ${pattern}`)();
+    expect('[addressed] n3 - done\n[deferred] n4 - later'.match(regex)).toEqual(['[addressed] n3', '[deferred] n4']);
   });
 });

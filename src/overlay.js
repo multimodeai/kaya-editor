@@ -303,20 +303,28 @@ export const OVERLAY_SCRIPT = `
   // notes get written into a queue nobody is draining.
   function renderPresence(p){
     if(!presenceEl) return;
-    const listening = p==='listening', working = p==='working';
-    presenceEl.textContent = listening ? 'Agent listening' : working ? 'Agent working' : 'No agent listening';
-    presenceEl.className = 'kaya-presence' + (listening ? ' kaya-live' : working ? ' kaya-busy' : ' kaya-off');
+    const listening = p==='listening', working = p==='working', replied = p==='replied';
+    presenceEl.textContent = listening ? 'Agent listening' : working ? 'Agent working' : replied ? 'Agent replied' : 'No agent listening';
+    presenceEl.className = 'kaya-presence' + (listening ? ' kaya-live' : working ? ' kaya-busy' : replied ? ' kaya-replied' : ' kaya-off');
     if(noListenEl) noListenEl.classList.toggle('kaya-show', p==='waiting' && !state.ended);
   }
   let historyKey='';
+  // Receipt lines read "[addressed] n3 - what was done". Colour the outcome so a
+  // reviewer can see at a glance which notes were done, deferred or turned down.
+  function receiptHtml(text){
+    return esc(text).replace(/^\\[(addressed|deferred|rejected)\\] (n\\d+)/gm, function(_m, outcome, id){
+      return '<span class="kaya-rc kaya-rc-'+outcome+'">'+outcome+'</span> <span class="kaya-nid">'+id+'</span>';
+    });
+  }
   function renderHistory(hist){
     const key=hist.length+':'+(hist.length?(hist[hist.length-1].text||'').length:0);
     if(key===historyKey) return; historyKey=key;
     if(!hist.length){ logEl.innerHTML='<div class="kaya-empty">No messages yet.<br>Flip on <b>Annotate</b>, click a box or select some text, add a note, then <b>Send to Agent</b>.</div>'; return; }
     let round=0, out='';
     for(let k=0;k<hist.length;k++){ const m=hist[k];
-      if(m.role==='agent'){ round++; out+='<div class="kaya-msg agent"><span class="kaya-who">Agent <span class="kaya-round">Round '+round+'</span></span>'+esc(m.text)+'</div>'; }
-      else { out+='<div class="kaya-msg you"><span class="kaya-who">You</span>'+(m.ref?'<span class="kaya-ref">'+esc(m.ref)+'</span>':'')+esc(m.text)+'</div>'; }
+      if(m.role==='agent'){ round++; out+='<div class="kaya-msg agent"><span class="kaya-who">Agent <span class="kaya-round">Round '+round+'</span></span>'+receiptHtml(m.text)+'</div>'; }
+      // The id ties a note to the agent's receipt line for it ("[addressed] n3 - ...").
+      else { out+='<div class="kaya-msg you"><span class="kaya-who">You'+(m.id?' <span class="kaya-nid">'+esc(m.id)+'</span>':'')+'</span>'+(m.ref?'<span class="kaya-ref">'+esc(m.ref)+'</span>':'')+esc(m.text)+'</div>'; }
     }
     logEl.innerHTML=out; logEl.scrollTop=logEl.scrollHeight;
   }

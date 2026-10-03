@@ -53,6 +53,12 @@ html.kaya-annotate { cursor:crosshair; }
 #kaya-convo .kaya-nolisten { display:none; margin:10px 14px 0; padding:9px 12px; border:1px solid rgba(224,170,78,.4); border-radius:9px; background:rgba(224,170,78,.1); color:#e0aa4e; font-size:11.5px; line-height:1.45; }
 #kaya-convo .kaya-nolisten.kaya-show { display:block; }
 #kaya-convo .kaya-nolisten b { color:#f0c069; }
+#kaya-convo .kaya-nid { display:inline-block; margin-left:4px; padding:0 6px; border-radius:99px; background:rgba(255,255,255,.08); color:var(--ink); font-family:ui-monospace,Menlo,monospace; font-size:10px; letter-spacing:0; text-transform:none; font-weight:600; }
+#kaya-convo .kaya-rc { display:inline-block; padding:1px 7px; border-radius:99px; font-size:10px; font-weight:800; letter-spacing:.04em; text-transform:uppercase; }
+#kaya-convo .kaya-rc-addressed { background:rgba(111,191,139,.16); color:#6fbf8b; }
+#kaya-convo .kaya-rc-deferred { background:rgba(224,170,78,.16); color:#e0aa4e; }
+#kaya-convo .kaya-rc-rejected { background:rgba(224,138,122,.16); color:#e08a7a; }
+#kaya-convo .kaya-presence.kaya-replied { color:var(--muted); }
 #kaya-convo .kaya-log { flex:1 1 0; min-height:0; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:11px; }
 #kaya-convo .kaya-msg { padding:10px 12px; border-radius:11px; font-size:13px; line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere; }
 #kaya-convo .kaya-msg .kaya-who { display:block; font-size:9.5px; font-weight:700; letter-spacing:.16em; text-transform:uppercase; margin-bottom:5px; opacity:.85; }
