@@ -53,6 +53,29 @@ function safeAssetPath(root, pathname) {
   return candidate;
 }
 
+// The original plain-text poll format, kept byte-compatible for clients that
+// predate the JSON contract.
+function legacyPollText(d) {
+  const n = d.feedback.length;
+  // Numbered once there is more than one, so a batch reads as N separate action
+  // items rather than one skimmable block (an agent answering only the first of
+  // several queued notes was observed, 2026-08-28).
+  const feedback = n > 1
+    ? d.feedback.map((item, i) => `[item ${i + 1}/${n}]\n${item.rawText}`).join('\n\n')
+    : d.feedback.map((item) => item.rawText).join('\n\n');
+  const heldLine = d.held > 0 ? `held: ${d.held} staged\n` : '';
+  const snapshotLine = d.snapshot
+    ? `dom_snapshot: ${d.snapshot}\n  (the rendered page as it looked when these notes were written - open it only if a note is unclear without seeing the page state)\n`
+    : '';
+  const disconnectedLines = d.disconnected
+    ? 'browser_disconnected: true\nnext_step: the review window was closed or disconnected. The session is still open and resumable. Ask the user whether to reopen it or end it, and do neither uninvited. Do not keep polling in a loop while it is disconnected.\n'
+    : '';
+  const nextStepLine = feedback && !d.ended
+    ? `next_step: address every numbered item above, apply the changes, then run \`kaya poll <file> --agent-reply "<what changed>"\` again BEFORE replying to the user anywhere else. Do not answer outside Kaya while this review is open. Poll delivery consumes the response, so read it completely.\n`
+    : '';
+  return `${feedback}${feedback ? '\n\n' : ''}session_ended: ${d.ended ? 'true' : 'false'}\n${heldLine}${snapshotLine}${disconnectedLines}${nextStepLine}`;
+}
+
 export class KayaReviewServer {
   constructor(file, options = {}) {
     this.file = resolve(file);
@@ -115,6 +138,29 @@ export class KayaReviewServer {
       for (const waiter of this.waiters) waiter(result);
       this.waiters.clear();
     }
+  }
+
+  // Everything a poll delivers, as data. Consuming the snapshot path here keeps
+  // it attached to exactly the batch it was captured with.
+  describeDelivery(result) {
+    const feedback = result.feedback.map((item) => ({
+      tag: item.tag,
+      selector: item.selector || null,
+      selected: item.selectedText || null,
+      note: item.text,
+      attachments: item.attachments || [],
+      rawText: item.rawText,
+    }));
+    const snapshot = feedback.length && this.snapshot ? this.snapshot : null;
+    if (feedback.length) this.snapshot = undefined;
+    return {
+      ended: Boolean(result.ended),
+      endedBy: this.endedBy,
+      disconnected: Boolean(result.disconnected) && !result.ended,
+      held: this.clients.size > 0 ? this.stagedCount() : 0,
+      snapshot,
+      feedback,
+    };
   }
 
   fileMtime() { try { return statSync(this.file).mtimeMs; } catch (_error) { return 0; } }
@@ -244,36 +290,13 @@ export class KayaReviewServer {
     }
     if (url.pathname === '/__kaya/poll' && request.method === 'GET') {
       const result = await this.poll(url.searchParams.get('agent_reply') || undefined);
-      const n = result.feedback.length;
-      // Number every item once there is more than one, so a batch of N queued
-      // annotations reads as N distinct action items an agent must work through,
-      // not one wall of text that gets skimmed and treated as a single request -
-      // an agent answering only the first of several queued items and dropping
-      // the rest was observed in practice (2026-08-28).
-      const feedback = n > 1
-        ? result.feedback.map((item, i) => `[item ${i + 1}/${n}]\n${item.rawText}`).join('\n\n')
-        : result.feedback.map((item) => item.rawText).join('\n\n');
+      const delivery = this.describeDelivery(result);
+      // The CLI asks for JSON and renders TOON with its own next steps. Anything
+      // else gets the original plain text, so an older kaya binary polling a newer
+      // server, or the reverse during an upgrade, keeps working unchanged.
+      if (url.searchParams.get('format') === 'json') return json(response, 200, delivery);
       response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
-      const held = this.clients.size > 0 ? this.stagedCount() : 0;
-      const heldLine = held > 0 ? `held: ${held} staged\n` : '';
-      const snapshotLine = feedback && this.snapshot
-        ? `dom_snapshot: ${this.snapshot}\n  (the rendered page as it looked when these notes were written - open it only if a note is unclear without seeing the page state)\n`
-        : '';
-      if (feedback) this.snapshot = undefined;
-      // Baked into every delivery, not just documented once in a skill file, so
-      // it survives even when the agent never loaded (or has since forgotten)
-      // that guidance - the same incident showed an agent answering fully in
-      // its own chat/terminal instead of writing the reply back into Kaya.
-      const nextStepLine = feedback && !result.ended
-        ? `next_step: address every numbered item above, apply the changes, then run \`kaya poll <file> --agent-reply "<what changed>"\` again BEFORE replying to the user anywhere else. Do not answer outside Kaya while this review is open. Poll delivery consumes the response, so read it completely.\n`
-        : '';
-      // A closed review window is not the same as an ended review: the session is
-      // still resumable, so hand that decision to the user rather than reopening
-      // or ending anything unasked.
-      const disconnectedLines = result.disconnected && !result.ended
-        ? 'browser_disconnected: true\nnext_step: the review window was closed or disconnected. The session is still open and resumable. Ask the user whether to reopen it or end it, and do neither uninvited. Do not keep polling in a loop while it is disconnected.\n'
-        : '';
-      response.end(`${feedback}${feedback ? '\n\n' : ''}session_ended: ${result.ended ? 'true' : 'false'}\n${heldLine}${snapshotLine}${disconnectedLines}${nextStepLine}`);
+      response.end(legacyPollText(delivery));
       return;
     }
     // A screenshot pasted onto a note says in one image what a paragraph of

@@ -485,26 +485,52 @@ describe('held sessions + declarative asks', () => {
   });
 
   it('AC2/AC3: held line is emitted only when staged, and after session_ended', async () => {
-    const src = readFileSync(new URL('../src/server.js', import.meta.url), 'utf8');
-    expect(src).toContain('const heldLine = held > 0');
-    const poll = src.slice(src.indexOf("'/__kaya/poll'"));
-    const body = poll.slice(0, poll.indexOf('return;'));
-    expect(body.indexOf('session_ended:')).toBeLessThan(body.indexOf('${heldLine}'));
+    // Asserted on real output: this used to grep the source for a variable name,
+    // which broke on a pure refactor while the behaviour was unchanged.
+    const { file } = fixture();
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+    const deliver = async (staged) => {
+      await fetch(`${server.address()}__kaya/state?client=c2&staged=${staged}`);
+      await fetch(`${server.address()}__kaya/feedback`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ items: [{ text: 'a note' }], client: 'c1' })
+      });
+      return (await fetch(`${server.address()}__kaya/poll`)).text();
+    };
+    expect(await deliver(0)).not.toContain('held:');
+    const withHeld = await deliver(2);
+    expect(withHeld).toContain('held: 2 staged');
+    expect(withHeld.indexOf('session_ended:')).toBeLessThan(withHeld.indexOf('held:'));
   });
 
   it('AC4: user-ended sessions refuse a plain reopen, agent-ended do not', async () => {
-    const cli = readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8');
-    // Regression guard: requestTo resolves to a Response, so the body MUST be
-    // parsed before endedBy is read. A source-string match alone let this ship
-    // broken once (2026-08-22) - assert the parse, not just the comparison.
-    expect(cli).toMatch(/healthRes\.json\(\)/);
-    expect(cli).toMatch(/const health = await healthRes\.json/);
-    expect(cli).toContain("health.endedBy === 'user' && !reopen");
-    expect(cli).toContain('--reopen');
-    expect(cli).toContain("open(args[0], args.includes('--reopen'))");
-    expect(cli).toContain('/__kaya/end?by=agent');   // agent ends are labelled
+    // Exercised through the real binary against a registered server. This used
+    // to grep the source for variable names - which is how the original bug, an
+    // unparsed Response read as endedBy, shipped once (2026-08-22).
+    const { startKayaServer } = await import('../src/server.js');
+    const { file } = fixture();
+    const server = await startKayaServer(file);
+    activeServers.push(server);
+
+    await fetch(`${server.address()}__kaya/end?by=user`, { method: 'POST' });
+    const refused = await kaya(['open', file, '--no-open']);
+    expect(refused.code).toBe(1);
+    expect(refused.stdout).toContain('code: USER_ENDED');
+    expect(refused.stdout).toContain('--reopen');
+
+    const resumed = await kaya(['open', file, '--no-open', '--reopen']);
+    expect(resumed.code).toBe(0);
+    expect(resumed.stdout).toContain(server.address());   // same server, same URL
+
+    await fetch(`${server.address()}__kaya/end?by=agent`, { method: 'POST' });
+    const agentEnded = await kaya(['open', file, '--no-open']);
+    expect(agentEnded.code).toBe(0);                       // an agent's own end never locks the user out
+
     const overlay = readFileSync(new URL('../src/overlay.js', import.meta.url), 'utf8');
-    expect(overlay).toContain('/end?by=user');       // browser ends are labelled
+    expect(overlay).toContain('/end?by=user');             // browser ends are labelled
   });
 });
 
@@ -612,26 +638,117 @@ describe('annotate while zoomed', () => {
   });
 });
 
+import { execFile } from 'node:child_process';
+
+// Run the real installed entrypoint, not main() in-process: exit codes, the
+// --version fast path and stdout-only output are only observable from outside.
+function kaya(args, cwd) {
+  return new Promise((resolveRun) => {
+    execFile(process.execPath, [new URL('../bin/kaya.js', import.meta.url).pathname, ...args],
+      { cwd: cwd || process.cwd(), env: { ...process.env, NO_COLOR: '1' } },
+      (error, stdout, stderr) => resolveRun({ code: error ? error.code : 0, stdout, stderr }));
+  });
+}
+
 describe('guidance ships with the binary, not a skill file', () => {
   it('kaya --help carries the workflow rules that used to live only in the skill', async () => {
-    const { main } = await import('../src/cli.js');
-    const lines = [];
-    const original = console.log;
-    console.log = (value) => lines.push(String(value));
-    try { await main(['--help']); } finally { console.log = original; }
-    const text = lines.join('\n');
+    const { code, stdout } = await kaya(['--help']);
+    expect(code).toBe(0);
     // the rules an agent most often breaks must be discoverable from the CLI
-    expect(text).toContain('kaya poll <file>');
-    expect(text).toContain('PUT THE PRINTED URL IN YOUR REPLY');
-    expect(text).toContain('Answer IN Kaya, not in your own chat');
-    expect(text).toContain('Address EVERY item');
-    expect(text).toContain('One poll at a time');
-    expect(text).toContain('held: N staged');
-    expect(text).toContain('browser_disconnected');
-    expect(text).toContain('DELEGATING');
-    expect(text).toContain('data-kaya-ask');
-    // and the two claims that were wrong in the skill file are stated correctly
-    expect(text).toContain('There is no idle auto-stop');
-    expect(text).toContain('stops EVERY session on the machine');
+    for (const rule of [
+      'kaya poll <file>', 'PUT THE PRINTED URL IN YOUR REPLY', 'Answer IN Kaya, not in your own chat',
+      'Address EVERY item', 'One poll at a time', '"held" counts notes', 'review window disconnected',
+      'delegating:', 'data-kaya-ask',
+      // the claim the skill file once got wrong, stated correctly
+      'reinstalling kaya does not\n  change a review that is already running',
+    ]) expect(stdout).toContain(rule);
+  });
+});
+
+describe('AXI conformance, observed from the real binary', () => {
+  it('--version, -v and -V print the bare version and exit 0', async () => {
+    const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    for (const flag of ['--version', '-v', '-V']) {
+      const { code, stdout } = await kaya([flag]);
+      expect(code).toBe(0);
+      expect(stdout.trim()).toBe(version);   // used to be read as an artifact path
+    }
+  });
+
+  it('an unknown flag fails loud with exit 2 and names the valid ones', async () => {
+    const listed = await kaya(['list', '--nonsense']);
+    expect(listed.code).toBe(2);                 // used to be ignored, exit 0
+    expect(listed.stdout).toContain('unknown flag --nonsense');
+    const polled = await kaya(['poll', '--bogus', 'x']);
+    expect(polled.code).toBe(2);                 // used to be read as the file path
+    expect(polled.stdout).toContain('valid flags for `poll`: --agent-reply');
+  });
+
+  it('per-command --help is concise and does not touch any session', async () => {
+    const { code, stdout } = await kaya(['poll', '--help']);
+    expect(code).toBe(0);
+    expect(stdout).toContain('usage: kaya poll <file>');
+    expect(stdout).not.toContain('no live review');   // used to be read as a file named --help
+  });
+
+  it('errors are structured on stdout with an actionable next step', async () => {
+    const { code, stdout, stderr } = await kaya(['open', 'definitely-missing.html']);
+    expect(code).toBe(1);
+    expect(stdout).toContain('error: "artifact not found');
+    expect(stdout).toContain('code: NOT_FOUND');
+    expect(stdout).toContain('kaya open <file>');
+    expect(stderr).toBe('');
+  });
+
+  it('a bare stop refuses rather than killing every review on the machine', async () => {
+    const { code, stdout } = await kaya(['stop']);
+    expect(code).toBe(2);
+    expect(stdout).toContain('--all');
+  });
+
+  it('end is idempotent: nothing running is a no-op, not an error', async () => {
+    const { code, stdout } = await kaya(['end', 'never-opened.html']);
+    expect(code).toBe(0);
+    expect(stdout).toContain('no-op');
+  });
+
+  it('bare kaya shows live content first: identity, then this directory\'s reviews', async () => {
+    const { directory } = fixture();
+    const { code, stdout } = await kaya([], directory);
+    expect(code).toBe(0);
+    expect(stdout).toMatch(/^bin: /m);
+    expect(stdout).toMatch(/^description: /m);
+    expect(stdout).toContain('0 live Kaya reviews in this directory');   // definitive empty state
+    expect(stdout).toContain('kaya open <file>');
+  });
+
+  it('kaya <file> is still the short form of kaya open <file>', async () => {
+    const { code, stdout } = await kaya(['missing-artifact.html']);
+    expect(code).toBe(1);
+    expect(stdout).toContain('artifact not found');  // routed to open, not "unknown command"
+  });
+});
+
+describe('poll JSON contract', () => {
+  it('format=json returns the delivery as data; the default stays plain text', async () => {
+    const { file } = fixture();
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+    const send = () => fetch(`${server.address()}__kaya/feedback`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ items: [{ text: 'first', selector: '#a' }, { text: 'second' }], snapshot: '<html>S</html>' })
+    });
+    await send();
+    const asJson = await fetch(`${server.address()}__kaya/poll?format=json`);
+    expect(asJson.headers.get('content-type')).toContain('application/json');
+    const d = await asJson.json();
+    expect(d.feedback.map((f) => f.note)).toEqual(['first', 'second']);
+    expect(d.feedback[0].selector).toBe('#a');
+    expect(d.snapshot).toBeTruthy();
+    expect(d.ended).toBe(false);
+    await send();
+    const asText = await (await fetch(`${server.address()}__kaya/poll`)).text();
+    expect(asText).toContain('[item 1/2]');           // older clients see exactly what they used to
   });
 });
