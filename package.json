@@ -19,7 +19,8 @@
     "THIRD-PARTY-NOTICES.md"
   ],
   "scripts": {
-    "test": "vitest run test"
+    "test": "vitest run test",
+    "upstream": "node scripts/upstream.mjs"
   },
   "license": "FSL-1.1-MIT",
   "keywords": [
@@ -35,5 +36,9 @@
   ],
   "devDependencies": {
     "vitest": "^4.0.18"
+  },
+  "dependencies": {
+    "@toon-format/toon": "^2.3.1",
+    "axi-sdk-js": "^0.1.13"
   }
 }
