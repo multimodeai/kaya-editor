@@ -901,3 +901,17 @@ describe('the overlay script survives being embedded in a template literal', () 
     expect('[addressed] n3 - done\n[deferred] n4 - later'.match(regex)).toEqual(['[addressed] n3', '[deferred] n4']);
   });
 });
+
+describe('the installable skill', () => {
+  it('stays a pointer: it names only real commands and defers to kaya --help', async () => {
+    const skill = readFileSync(new URL('../skills/kaya/SKILL.md', import.meta.url), 'utf8');
+    expect(skill).toMatch(/^---\nname: kaya\ndescription: .+\n---/);
+    expect(skill).toContain('--help');
+    const { stdout } = await kaya(['--help']);
+    const commands = [...stdout.matchAll(/^ {2}([a-z]+) /gm)].map((m) => m[1]);
+    for (const used of [...skill.matchAll(/kaya(?:-editor)? ([a-z]+) /g)].map((m) => m[1])) {
+      expect(commands).toContain(used);   // a skill naming a command that no longer exists has drifted
+    }
+    expect(JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).files).toContain('skills');
+  });
+});

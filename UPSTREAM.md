@@ -38,11 +38,18 @@ Declined items stay declined. They are recorded so the same question is not re-a
 | Guidance lives in the CLI, skill is a pointer | lavish-axi | adopted | The skill file drifted twice from the code |
 | DOM snapshot with feedback | lavish-axi | adapted | Written to disk and passed as a path, not inlined, so it never buries the notes |
 | Image attachments | lavish-axi | adopted | |
-| One server on a fixed port | lavish-axi | adopting | Root cause of dead URLs, stranded notes and stale servers |
-| Superseding pollers | lavish-axi 0.1.75 | adopting | 25 concurrent pollers piled up on one session |
-| `reply` command with acceptance receipt | lavish-axi 0.1.80 | adopting | A reply could only ride on a poll |
-| Per-item receipts for batches | lavish-axi | adopting | Numbering showed items but did not make agents account for them |
-| Full AXI compliance via axi-sdk-js | axi-spec | adopting | Building on the same SDK keeps Kaya close without re-implementing it |
+| One server on a fixed port | lavish-axi | adopted | Root cause of dead URLs, stranded notes and stale servers. Port 41731, not Lavish's 4387, so both can run |
+| Superseding pollers | lavish-axi 0.1.75 | adopted | 25 concurrent pollers piled up on one session. Only JSON-speaking clients take part, so old ones cannot ping-pong |
+| `reply` command with acceptance receipt | lavish-axi 0.1.80 | adopted | A reply could only ride on a poll |
+| Per-item receipts for batches | lavish-axi | adapted | Applied to every batch, not just tracked forms; skipped ids are named back on the next poll or reply |
+| Full AXI compliance via axi-sdk-js | axi-spec | adopted | Building on the same SDK keeps Kaya close without re-implementing it |
+| AXI 3: truncate large fields | axi-spec | adapted | Notes are never truncated: they are the payload, and a skimmed batch is how only the first note got answered. The DOM snapshot is passed as a path instead |
+| AXI 7: session hooks, then a skill | axi-spec | adopted | `kaya setup hooks` via the SDK; `skills/kaya/SKILL.md` ships as a pointer to `kaya --help` |
+| Idle auto-stop | lavish-axi | adopted | 30 minutes; an open tab keeps the server alive, so a review never dies under someone reading it |
+| Server replaces older running code | own | adopted | A running server used to keep its old code forever; open and poll now swap it for the current one, never a downgrade |
+| Stop refuses while notes are unsent | own | adopted | Restarting a per-file server stranded typed notes; `--force` to override |
+| Fatal render detection (`artifact_failures`) | lavish-axi | open | Not yet reviewed in depth |
+| Per-harness guidance | lavish-axi | open | Lavish special-cases Codex; not yet needed |
 | Whiteboard / Excalidraw editing | lavish-axi | declined | About 8MB of runtime for diagram redrawing nobody has asked for |
 | Share to third-party hosting | lavish-axi | declined | Kaya is local-only by design; `export` covers portability |
 | Usage telemetry | lavish-axi | declined | Lavish reports every command to an analytics host; Kaya sends nothing anywhere |
