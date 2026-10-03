@@ -660,7 +660,7 @@ describe('guidance ships with the binary, not a skill file', () => {
       'Address EVERY item', 'One poll at a time', '"held" counts notes', 'review window disconnected',
       'delegating:', 'data-kaya-ask',
       // the claim the skill file once got wrong, stated correctly
-      'reinstalling kaya does not\n  change a review that is already running',
+      'moves onto a newer kaya by itself', 'stopping refuses while the user has unsent notes',
     ]) expect(stdout).toContain(rule);
   });
 });
@@ -750,5 +750,110 @@ describe('poll JSON contract', () => {
     await send();
     const asText = await (await fetch(`${server.address()}__kaya/poll`)).text();
     expect(asText).toContain('[item 1/2]');           // older clients see exactly what they used to
+  });
+});
+
+describe('one shared server on a fixed port', () => {
+  // Each test gets its own state directory and port, so nothing here touches a
+  // real review running on this machine.
+  async function daemonIn(stateDir, port = 0) {
+    process.env.KAYA_STATE_DIR = stateDir;
+    const { KayaDaemon } = await import('../src/server.js');
+    const daemon = new KayaDaemon({ port, idleMs: 60_000 });
+    await daemon.start();
+    return daemon;
+  }
+  const stateDirs = [];
+  function freshState() { const d = mkdtempSync(join(tmpdir(), 'kaya-state-')); stateDirs.push(d); return d; }
+  afterEach(() => { delete process.env.KAYA_STATE_DIR; stateDirs.splice(0).forEach((d) => rmSync(d, { recursive: true, force: true })); });
+
+  it('serves several reviews on one port, each at its own path with its own assets and API', async () => {
+    const daemon = await daemonIn(freshState());
+    try {
+      const { directory, file: a } = fixture('<!doctype html><html><body><h1>A</h1><img src="pic.svg"></body></html>');
+      writeFileSync(join(directory, 'pic.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>');
+      const { file: b } = fixture('<!doctype html><html><body><h1>B</h1></body></html>');
+      const ua = daemon.open(a).url; const ub = daemon.open(b).url;
+      expect(new URL(ua).port).toBe(new URL(ub).port);          // one port
+      expect(ua).not.toBe(ub);                                    // two reviews
+      expect(ua).toMatch(/\/s\/[0-9a-f]{12}\/$/);
+      expect((await fetch(`${ua}pic.svg`)).status).toBe(200);   // relative assets resolve
+      const page = await (await fetch(ua)).text();
+      expect(page).toContain(`const base = '${new URL(ua).pathname}__kaya'`);   // API scoped to this review
+      const bare = await fetch(ua.replace(/\/$/, ''), { redirect: 'manual' });
+      expect(bare.status).toBe(301);                              // trailing slash enforced
+      // notes posted to A never reach B
+      await fetch(`${ua}__kaya/feedback`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ items: [{ text: 'for A only' }] }) });
+      const d = await (await fetch(`${ua}__kaya/poll?format=json`)).json();
+      expect(d.feedback.map((f) => f.note)).toEqual(['for A only']);
+      expect(daemon.describeAll().find((r) => r.file === b).unread).toBe(0);
+    } finally { await daemon.shutdown(); }
+  });
+
+  it('undelivered notes, ended status and the URL all survive a restart', async () => {
+    const state = freshState();
+    const { file: a } = fixture();
+    const { file: b } = fixture();
+    let daemon = await daemonIn(state);
+    const port = daemon.port;
+    const ua = daemon.open(a).url;
+    const ub = daemon.open(b).url;
+    await fetch(`${ua}__kaya/feedback`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ items: [{ text: 'one' }, { text: 'two' }] }) });
+    await fetch(`${ub}__kaya/end?by=user`, { method: 'POST' });
+    await daemon.shutdown({ restarting: true });
+
+    daemon = await daemonIn(state, port);                         // a new process, same state on disk
+    try {
+      expect(daemon.url(a)).toBe(ua);                             // same URL, so the same browser origin
+      const d = await (await fetch(`${ua}__kaya/poll?format=json`)).json();
+      expect(d.feedback.map((f) => f.note)).toEqual(['one', 'two']);
+      const h = await (await fetch(`${ub}__kaya/health`)).json();
+      expect(h.ended).toBe(true);
+      expect(h.endedBy).toBe('user');
+    } finally { await daemon.shutdown(); }
+  });
+
+  it('a restart wakes attached polls as interrupted, never as ended', async () => {
+    const daemon = await daemonIn(freshState());
+    const { file } = fixture();
+    const url = daemon.open(file).url;
+    const polling = fetch(`${url}__kaya/poll?format=json`).then((r) => r.json());
+    await new Promise((r) => setTimeout(r, 50));
+    await daemon.shutdown({ restarting: true });
+    const d = await polling;
+    // ended:true here would make an agent stop polling during a routine upgrade
+    expect(d.ended).toBe(false);
+    expect(d.feedback).toEqual([]);
+  });
+
+  it('stopping a review forgets it but keeps its conversation for the next open', async () => {
+    const daemon = await daemonIn(freshState());
+    try {
+      const { file } = fixture();
+      const url = daemon.open(file).url;
+      await fetch(`${url}__kaya/feedback`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ items: [{ text: 'remember me' }] }) });
+      await fetch(`${url}__kaya/poll?format=json`);
+      await fetch(`${url}__kaya/stop`, { method: 'POST' });
+      await new Promise((r) => setTimeout(r, 30));
+      expect(daemon.describeAll().some((r) => r.file === file)).toBe(false);
+      expect((await fetch(url)).status).toBe(404);
+      daemon.open(file);
+      const st = await (await fetch(`${url}__kaya/state`)).json();
+      expect(st.history.map((h) => h.text)).toContain('remember me');
+    } finally { await daemon.shutdown(); }
+  });
+
+  it('stops itself when nothing has used it for the idle window', async () => {
+    process.env.KAYA_STATE_DIR = freshState();
+    const { KayaDaemon } = await import('../src/server.js');
+    const daemon = new KayaDaemon({ port: 0, idleMs: 1000 });
+    await daemon.start();
+    let idled = false;
+    daemon.onIdle = () => { idled = true; };
+    daemon.lastUsed = Date.now() - 5000;
+    daemon.checkIdle();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(idled).toBe(true);
+    expect(daemon.server).toBeUndefined();
   });
 });

@@ -3,11 +3,11 @@ import { existsSync } from 'node:fs';
 import { dirname, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
-  AxiError, installSessionStartHooks, runAxiCli, sessionStartHookStatus, uninstallSessionStartHooks,
+  AxiError, compareSemver, installSessionStartHooks, runAxiCli, sessionStartHookStatus, uninstallSessionStartHooks,
 } from 'axi-sdk-js';
 import { exportHtml } from './export.js';
-import { startKayaServer } from './server.js';
-import { listRegistries, readRegistry } from './registry.js';
+import { KayaDaemon, startKayaServer } from './server.js';
+import { listRegistries, readDaemon, readRegistry, urlKeyFor } from './registry.js';
 import { VERSION } from './version.js';
 
 const cliFile = fileURLToPath(import.meta.url);
@@ -59,7 +59,7 @@ const SPECS = {
   list: { usage: 'kaya list', flags: {} },
   end: { usage: 'kaya end <file>', flags: {}, min: 1, argName: 'an artifact file' },
   export: { usage: 'kaya export <file> [--out <path>]', flags: { '--out': 'string' }, min: 1, argName: 'an artifact file' },
-  stop: { usage: 'kaya stop <file> | kaya stop --all', flags: { '--all': 'boolean' }, min: 0, max: 1 },
+  stop: { usage: 'kaya stop <file> | kaya stop --all [--force]', flags: { '--all': 'boolean', '--force': 'boolean' }, min: 0, max: 1 },
   setup: { usage: 'kaya setup hooks | kaya setup status | kaya setup remove', flags: {}, min: 1, argName: 'hooks, status or remove' },
 };
 
@@ -74,22 +74,87 @@ function normalizeArgv(argv) {
 
 function isArtifactPath(arg) { return /\.(html?|md|markdown)$/i.test(arg); }
 
-// ---- talking to a session -------------------------------------------------------
-// The only place that knows where a session's server lives. The single-server
-// rework replaces this, not the commands built on it.
+// ---- talking to a session ----------------------------------------------------
+// Every review is served by one shared process on a fixed port at /s/<key>/, so
+// its URL never changes. A review still running on a per-file server from an
+// older kaya keeps using that server until it is stopped, so nothing in flight
+// is ever split across two servers.
 
-function sessionOrigin(file) {
+const PROBE_MS = 800;
+
+async function getJson(url, timeoutMs = PROBE_MS) {
+  const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+  if (!response.ok) throw new Error(`${response.status}`);
+  return response.json();
+}
+
+async function legacyOrigin(file) {
   const registry = readRegistry(file);
-  return registry ? `http://${registry.host || '127.0.0.1'}:${registry.port}` : null;
+  if (!registry?.port) return null;
+  const origin = `http://${registry.host || '127.0.0.1'}:${registry.port}`;
+  try { await getJson(`${origin}/__kaya/health`); return origin; } catch (_error) { return null; }
+}
+
+function daemonOrigin(record = readDaemon()) {
+  return record ? `http://${record.host || '127.0.0.1'}:${record.port}` : null;
+}
+
+async function liveDaemon() {
+  const origin = daemonOrigin();
+  if (!origin) return null;
+  try {
+    const health = await getJson(`${origin}/__kaya/health`);
+    return health.daemon ? { origin, health } : null;
+  } catch (_error) { return null; }
+}
+
+async function waitFor(check, ms = 6000) {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    if (await check()) return true;
+    await new Promise((r) => setTimeout(r, 60));
+  }
+  return false;
+}
+
+// Start the shared server if it is not running, and replace it if it is running
+// older code. Replacing is cheap now: every review's state is on disk and its
+// URL stays the same, so an open tab simply reconnects. A newer server is never
+// downgraded by an older kaya.
+async function ensureDaemon() {
+  const live = await liveDaemon();
+  if (live && compareSemver(live.health.version, VERSION) >= 0) return live.origin;
+  if (live) {
+    await fetch(`${live.origin}/__kaya/shutdown?restarting=1`, { method: 'POST', signal: AbortSignal.timeout(2000) }).catch(() => {});
+    await waitFor(async () => !(await liveDaemon()), 5000);
+  }
+  const child = spawn(process.execPath, [cliFile, '--daemon'], { detached: true, stdio: 'ignore' });
+  child.unref();
+  const up = await waitFor(async () => Boolean(await liveDaemon()));
+  if (!up) {
+    throw new AxiError('the shared Kaya server did not start', 'SERVER_ERROR', [
+      `Another program may hold port ${process.env.KAYA_PORT || 41731}; set KAYA_PORT to a free port and retry`,
+    ]);
+  }
+  return daemonOrigin();
+}
+
+// Where this review's API lives, without starting anything.
+async function sessionOrigin(file) {
+  const legacy = await legacyOrigin(file);
+  if (legacy) return legacy;
+  const live = await liveDaemon();
+  return live ? `${live.origin}/s/${urlKeyFor(file)}` : null;
 }
 
 async function requestTo(file, path, options = {}) {
-  const origin = sessionOrigin(file);
+  const origin = await sessionOrigin(file);
   if (!origin) throw noSession(file);
   const signal = options.timeoutMs ? AbortSignal.timeout(options.timeoutMs) : undefined;
   let response;
   try { response = await fetch(`${origin}${path}`, { ...options, signal }); }
   catch (_error) { throw noSession(file); }
+  if (response.status === 404) throw noSession(file);
   if (!response.ok) throw new AxiError(`the review server for ${display(file)} answered ${response.status}`, 'SERVER_ERROR', [`Run \`kaya open ${display(file)}\` to restart it; the conversation is kept on disk`]);
   return response;
 }
@@ -100,15 +165,21 @@ function noSession(file) {
 
 async function liveSessions() {
   const rows = [];
+  const live = await liveDaemon();
+  if (live) {
+    try {
+      const { sessions } = await getJson(`${live.origin}/__kaya/sessions`, 2000);
+      for (const s of sessions) rows.push({ file: s.file, url: s.url, ended: s.ended, staged: s.staged, unread: s.unread, lastActivity: s.lastActivity, shared: true });
+    } catch (_error) { /* shared server mid-restart: show what else is live */ }
+  }
   for (const r of listRegistries()) {
     if (!r.file || !r.port) continue;
     const origin = `http://${r.host || '127.0.0.1'}:${r.port}`;
     try {
-      const response = await fetch(`${origin}/__kaya/health`, { signal: AbortSignal.timeout(600) });
-      if (!response.ok) continue;
-      const info = await response.json();
-      rows.push({ file: r.file, url: `${origin}/`, ended: Boolean(info.ended), staged: info.staged || 0, lastActivity: info.lastActivity || 0 });
-    } catch (_error) { /* dead registry entry, not a live session */ }
+      const info = await getJson(`${origin}/__kaya/health`, 600);
+      if (rows.some((row) => row.file === r.file)) continue;
+      rows.push({ file: r.file, url: `${origin}/`, ended: Boolean(info.ended), staged: info.staged || 0, unread: 0, lastActivity: info.lastActivity || 0, shared: false });
+    } catch (_error) { /* dead per-file server, not a live review */ }
   }
   return rows.sort((a, b) => b.lastActivity - a.lastActivity);
 }
@@ -132,25 +203,10 @@ function relTime(ms) {
 
 function sessionRows(sessions) {
   const now = Date.now();
-  return sessions.map((s) => ({ name: display(s.file), url: s.url, status: s.ended ? 'ended' : 'open', active: relTime(now - s.lastActivity) }));
+  return sessions.map((s) => ({ name: display(s.file), url: s.url, status: s.ended ? 'ended' : 'open', unread: s.unread || 0, active: s.lastActivity ? relTime(now - s.lastActivity) : 'idle' }));
 }
 
 // ---- commands -------------------------------------------------------------------
-
-async function waitForSession(target) {
-  const until = Date.now() + 5000;
-  while (Date.now() < until) {
-    try {
-      const origin = sessionOrigin(target);
-      if (origin) {
-        const response = await fetch(`${origin}/__kaya/health`, { signal: AbortSignal.timeout(500) });
-        if (response.ok) return;
-      }
-    } catch (_error) { /* child server still starting */ }
-    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
-  }
-  throw new AxiError(`the review server for ${display(target)} did not start`, 'SERVER_ERROR', ['Check that the port range is free, then rerun `kaya open <file>`']);
-}
 
 function openBrowser(url) {
   const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open';
@@ -174,34 +230,47 @@ async function open(args) {
   const { flags, positionals } = parse('open', args, SPECS.open);
   const target = resolve(positionals[0]);
   if (!existsSync(target)) throw new AxiError(`artifact not found: ${display(target)}`, 'NOT_FOUND', ['Write the artifact first, then run `kaya open <file>`']);
-  const origin = sessionOrigin(target);
-  if (origin) {
-    let health = null;
-    try {
-      const response = await fetch(`${origin}/__kaya/health`, { signal: AbortSignal.timeout(500) });
-      if (response.ok) health = await response.json();
-    } catch (_error) { /* stale registry: fall through and start a fresh server */ }
-    if (health) {
-      // A review the USER ended is theirs to resume. An agent ending its own
-      // turn does not lock the user out.
-      if (health.endedBy === 'user' && !flags['--reopen']) {
-        throw new AxiError(`${display(target)} was ended by the user`, 'USER_ENDED', [
-          'Deliver any remaining updates in the conversation instead',
-          `Only if the user asks to continue: run \`kaya open ${display(target)} --reopen\``,
-        ]);
-      }
-      // Reuse the live server so the URL and the conversation survive. The open
-      // tab live-reloads, so the browser is deliberately not opened again.
-      await fetch(`${origin}/__kaya/reopen`, { method: 'POST', signal: AbortSignal.timeout(500) }).catch(() => {});
-      return openedOutput(target, `${origin}/`, 'reused - the open tab live-reloads, so no new window');
-    }
+
+  // A review already running on a per-file server from an older kaya stays put.
+  const legacy = await legacyOrigin(target);
+  if (legacy) {
+    const health = await getJson(`${legacy}/__kaya/health`).catch(() => ({}));
+    if (health.endedBy === 'user' && !flags['--reopen']) throw userEnded(target);
+    await fetch(`${legacy}/__kaya/reopen`, { method: 'POST', signal: AbortSignal.timeout(500) }).catch(() => {});
+    const out = openedOutput(target, `${legacy}/`, 'reused - the open tab live-reloads, so no new window');
+    out.help.push(`This review runs on an older per-file server. \`kaya stop ${display(target)}\` then \`kaya open ${display(target)}\` moves it to a permanent URL - send any typed notes first`);
+    return out;
   }
-  const child = spawn(process.execPath, [cliFile, '--server', target], { detached: true, stdio: 'ignore', cwd: dirname(target) });
-  child.unref();
-  await waitForSession(target);
-  const url = `${sessionOrigin(target)}/`;
-  if (!flags['--no-open']) { try { openBrowser(url); } catch (_error) { /* the URL is in the output either way */ } }
-  return openedOutput(target, url, 'opened');
+
+  const origin = await ensureDaemon();
+  let info;
+  try {
+    const response = await fetch(`${origin}/__kaya/open`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ file: target }), signal: AbortSignal.timeout(3000),
+    });
+    info = await response.json();
+    if (!response.ok) throw new Error(info.error);
+  } catch (error) {
+    throw new AxiError(`could not open ${display(target)} for review`, 'SERVER_ERROR', [`${error.message}`, 'Retry `kaya open <file>`']);
+  }
+  // A review the USER ended is theirs to resume. An agent ending its own turn
+  // does not lock the user out.
+  if (info.ended && info.endedBy === 'user' && !flags['--reopen']) throw userEnded(target);
+  if (info.ended) await fetch(`${info.url}__kaya/reopen`, { method: 'POST', signal: AbortSignal.timeout(1000) }).catch(() => {});
+  // Only open a window when none is showing this review: a tab that is already
+  // up live-reloads, and spawning another per round is how duplicates piled up.
+  const showing = info.clients > 0;
+  if (!showing && !flags['--no-open']) { try { openBrowser(info.url); } catch (_error) { /* the URL is in the output either way */ } }
+  const status = info.created ? 'opened' : showing ? 'reused - already open in a tab, which live-reloads' : 'reopened';
+  return openedOutput(target, info.url, status);
+}
+
+function userEnded(target) {
+  return new AxiError(`${display(target)} was ended by the user`, 'USER_ENDED', [
+    'Deliver any remaining updates in the conversation instead',
+    `Only if the user asks to continue: run \`kaya open ${display(target)} --reopen\``,
+  ]);
 }
 
 // Notes are deliberately never truncated, unlike AXI's usual large-field rule:
@@ -231,7 +300,7 @@ function feedbackOutput(target, d) {
   } else if (d.disconnected) {
     out.next_step = 'The review window was closed or disconnected. The session is still open and resumable. Ask the user whether to reopen it or end it, and do neither uninvited. Do not keep polling in a loop while it is disconnected.';
   } else {
-    out.next_step = `Address every one of the ${n} item${n === 1 ? '' : 's'} above, apply the changes to ${f}, then run \`kaya poll ${f} --agent-reply "<what changed>"\` BEFORE replying to the user anywhere else. Do not answer outside Kaya while this review is open. Poll delivery consumes the response, so read it completely.`;
+    out.next_step = `${n === 1 ? 'Address the item above' : `Address every one of the ${n} items above`}, apply the changes to ${f}, then run \`kaya poll ${f} --agent-reply "<what changed>"\` BEFORE replying to the user anywhere else. Do not answer outside Kaya while this review is open. Poll delivery consumes the response, so read it completely.`;
     if (d.held > 0) out.next_step += ` The user also has ${d.held} note${d.held === 1 ? '' : 's'} typed but not sent; those arrive only when they press Send.`;
   }
   return out;
@@ -240,6 +309,9 @@ function feedbackOutput(target, d) {
 async function poll(args) {
   const { flags, positionals } = parse('poll', args, SPECS.poll);
   const target = resolve(positionals[0]);
+  // An agent working a review is exactly when it should be on current code, and
+  // this also starts the shared server if it stopped itself while idle.
+  if (!(await legacyOrigin(target))) { try { await ensureDaemon(); } catch (_error) { /* surfaces as no live review below */ } }
   let replySent = false;
   // Block until there is real feedback, an end, or a disconnect, looping over
   // the server's bounded keep-alives so no single request outlives the fetch
@@ -247,7 +319,15 @@ async function poll(args) {
   for (;;) {
     const params = new URLSearchParams({ format: 'json' });
     if (!replySent && flags['--agent-reply']) params.set('agent_reply', flags['--agent-reply']);
-    const response = await requestTo(target, `/__kaya/poll?${params}`);
+    let response;
+    try { response = await requestTo(target, `/__kaya/poll?${params}`); }
+    catch (error) {
+      // The shared server may be restarting onto newer code. The review lives
+      // on disk at the same URL, so wait for it to come back rather than tell
+      // the agent there is nothing to poll.
+      if (!(await reconnect(target))) throw error;
+      continue;
+    }
     replySent = true;
     // A server still running an older kaya ignores format=json and answers in
     // plain text. Pass that through unchanged rather than break mid-upgrade.
@@ -262,12 +342,21 @@ async function poll(args) {
   }
 }
 
+async function reconnect(target) {
+  if (await legacyOrigin(target)) return true;
+  try { await ensureDaemon(); } catch (_error) { return false; }
+  // Still unknown after a restart means it was stopped, not just interrupted.
+  const origin = daemonOrigin();
+  try { const r = await fetch(`${origin}/s/${urlKeyFor(target)}/__kaya/health`, { signal: AbortSignal.timeout(PROBE_MS) }); return r.ok; }
+  catch (_error) { return false; }
+}
+
 async function end(args) {
   const { positionals } = parse('end', args, SPECS.end);
   const target = resolve(positionals[0]);
   // Idempotent: a review that is already ended, or not running at all, is
   // already in the state asked for, so that is a no-op rather than an error.
-  if (!sessionOrigin(target)) return { session: { file: display(target), status: 'no live review (no-op)' } };
+  if (!(await sessionOrigin(target))) return { session: { file: display(target), status: 'no live review (no-op)' } };
   let health = null;
   try { health = await (await requestTo(target, '/__kaya/health', { timeoutMs: 1000 })).json(); }
   catch (_error) { return { session: { file: display(target), status: 'no live review (no-op)' } }; }
@@ -292,20 +381,36 @@ async function stop(args) {
     throw usage('stop', '`kaya stop` needs a file, or --all to stop every review on this machine');
   }
   if (positionals.length && flags['--all']) throw usage('stop', 'pass a file or --all, not both');
-  const targets = flags['--all'] ? listRegistries().filter((r) => r.file) : [readRegistry(resolve(positionals[0]))].filter(Boolean);
+  const sessions = await liveSessions();
+  const targets = flags['--all'] ? sessions : sessions.filter((s) => s.file === resolve(positionals[0]));
   if (!targets.length) {
     return { stopped: positionals.length ? `no live review for ${display(resolve(positionals[0]))} (no-op)` : '0 live reviews to stop' };
   }
+  // Notes the user has typed but not sent live in the browser. Stopping a
+  // per-file server moves the review to a new origin and strands them, which is
+  // exactly how notes were lost before. Refuse unless explicitly forced.
+  const holding = targets.filter((s) => s.staged > 0);
+  if (holding.length && !flags['--force']) {
+    throw new AxiError(`${holding.map((s) => `${display(s.file)} has ${s.staged} unsent note${s.staged === 1 ? '' : 's'}`).join('; ')}`, 'UNSENT_NOTES', [
+      'Ask the user to press Send in that review first',
+      'Or rerun with --force to stop anyway and lose those notes',
+    ]);
+  }
   const stopped = [];
-  for (const r of targets) {
+  for (const s of targets) {
+    const base = s.url.replace(/\/$/, '');
     try {
-      const response = await fetch(`http://${r.host || '127.0.0.1'}:${r.port}/__kaya/stop`, { method: 'POST', signal: AbortSignal.timeout(2000) });
-      if (response.ok) stopped.push(display(r.file));
-    } catch (_error) { /* already gone; the stale registry is replaced on the next open */ }
+      const response = await fetch(`${base}/__kaya/stop`, { method: 'POST', signal: AbortSignal.timeout(2000) });
+      if (response.ok) stopped.push(display(s.file));
+    } catch (_error) { /* already gone */ }
+  }
+  if (flags['--all']) {
+    const live = await liveDaemon();
+    if (live) await fetch(`${live.origin}/__kaya/shutdown`, { method: 'POST', signal: AbortSignal.timeout(2000) }).catch(() => {});
   }
   return {
     stopped: stopped.length ? stopped : '0 live reviews were running (no-op)',
-    help: stopped.length ? ['Conversations are kept on disk; `kaya open <file>` resumes one on a new URL'] : undefined,
+    help: stopped.length ? ['Conversations are kept on disk; `kaya open <file>` resumes one'] : undefined,
   };
 }
 
@@ -373,7 +478,7 @@ commands:
   list                                Every live review on this machine
   end <file>                          End a review as the agent
   export <file> [--out PATH]          Portable single file with local assets inlined
-  stop <file> | stop --all            Shut a review's server down; --all stops every one
+  stop <file> | stop --all            Stop a review; refuses while it holds unsent notes
   setup hooks|status|remove           Show live reviews at agent session start
   update [--check]                    Upgrade kaya itself
 
@@ -382,7 +487,8 @@ the loop:
      reviewed directly - Kaya renders it and never rewrites the source.
   2. kaya open <file>
   3. PUT THE PRINTED URL IN YOUR REPLY TO THE USER, in full, every time you mention the
-     review. They cannot see your tool output.
+     review. They cannot see your tool output. A review's URL is permanent: it survives
+     restarts and upgrades, so the same link keeps working.
   4. kaya poll <file> --agent-reply "<what you built, what to look at first>"
   5. Apply everything it returns, then poll again with a fresh --agent-reply saying what
      changed. That reply is how your answer reaches the browser.
@@ -399,8 +505,10 @@ rules that are easy to get wrong:
   "review window disconnected" means the tab was closed. The review is still resumable:
   ask the user whether to reopen or end it, and do neither alone.
   An ended review ends the loop. Stop polling. Do not reopen uninvited.
-  A server keeps the code it started with until stopped; reinstalling kaya does not
-  change a review that is already running.
+  Reviews share one server on a fixed port. It moves onto a newer kaya by itself the
+  next time \`kaya open\` or \`kaya poll\` runs, keeping every review, URL and unsent
+  note, and it stops itself after 30 idle minutes. A review still on an older per-file server keeps
+  its old code until stopped; stopping refuses while the user has unsent notes.
 
 delegating:
   A subagent inherits none of this. Spell out in its prompt the exact command, that it
@@ -442,9 +550,11 @@ example:
   Writes one self-contained HTML file with local assets inlined. Remote URLs stay links.
 example:
   kaya export .kaya/plan.html --out plan.offline.html`,
-  stop: `usage: kaya stop <file> | kaya stop --all
-  Stops a review's server. The conversation is kept on disk and resumes on the next open.
-  --all   stop every review on this machine, including other projects
+  stop: `usage: kaya stop <file> | kaya stop --all [--force]
+  Stops a review. The conversation is kept on disk and resumes on the next open.
+  Refuses while the user has typed notes they have not sent, since those would be lost.
+  --all     stop every review on this machine, including other projects
+  --force   stop even though unsent notes will be lost
 examples:
   kaya stop .kaya/plan.html
   kaya stop --all`,
@@ -458,7 +568,19 @@ examples:
 // ---- entry ----------------------------------------------------------------------
 
 export async function main(argv) {
-  // Internal: the detached per-file server process, never typed by an agent.
+  // Internal: the shared server process, started by `kaya open`.
+  if (argv[0] === '--daemon') {
+    const daemon = new KayaDaemon();
+    try { await daemon.start(); }
+    catch (_error) { process.exit(0); }   // another instance won the port race; it serves everyone
+    daemon.onIdle = () => process.exit(0);
+    const quit = () => daemon.shutdown().then(() => process.exit(0));
+    process.on('SIGTERM', quit);
+    process.on('SIGINT', quit);
+    return;
+  }
+  // Internal: a per-file server from before the shared server. Kept so reviews
+  // already running from an older kaya keep their process model.
   if (argv[0] === '--server') {
     const server = await startKayaServer(argv[1]);
     process.on('SIGTERM', () => server.close().then(() => process.exit(0)));

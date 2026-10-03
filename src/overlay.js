@@ -2,7 +2,7 @@ import { KAYA_PREFIX, OVERLAY_STYLE } from './constants.js';
 
 export const OVERLAY_SCRIPT = `
 (() => {
-  const base = '${KAYA_PREFIX}';
+  const base = '__KAYA_BASE__';
   const html = document.documentElement;
   const state = { annotate:false, queued:[], ended:false, lastReply:'', suppressClick:false, ctx:null, ref:null };
   const clientId = 'c' + Math.random().toString(36).slice(2, 12);
@@ -763,13 +763,15 @@ function stageKeyFor(sessionKey) {
   return (h >>> 0).toString(36);
 }
 
-export function overlayMarkup(sessionKey) {
-  const script = OVERLAY_SCRIPT.replace('__KAYA_SESSION_KEY__', stageKeyFor(sessionKey));
+// `base` is where this review's API lives: /__kaya for a single-file server, or
+// /s/<key>/__kaya when one shared server hosts many reviews on one port.
+export function overlayMarkup(sessionKey, base = KAYA_PREFIX) {
+  const script = OVERLAY_SCRIPT.replace('__KAYA_SESSION_KEY__', stageKeyFor(sessionKey)).replace('__KAYA_BASE__', base);
   return `<style id="kaya-overlay-style">${OVERLAY_STYLE}</style><script id="kaya-overlay-script">${script}</script>`;
 }
 
-export function injectOverlay(html, sessionKey) {
-  const marker = overlayMarkup(sessionKey);
+export function injectOverlay(html, sessionKey, base) {
+  const marker = overlayMarkup(sessionKey, base);
   if (/<\/body>/i.test(html)) return html.replace(/<\/body>/i, `${marker}</body>`);
   return `${html}\n${marker}`;
 }
