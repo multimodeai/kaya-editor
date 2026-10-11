@@ -6,7 +6,7 @@ import {
   AxiError, compareSemver, installSessionStartHooks, runAxiCli, sessionStartHookStatus, uninstallSessionStartHooks,
 } from 'axi-sdk-js';
 import { exportHtml } from './export.js';
-import { KayaDaemon, startKayaServer } from './server.js';
+import { KayaDaemon, isReviewableFile, startKayaServer } from './server.js';
 import { listRegistries, readDaemon, readRegistry, urlKeyFor } from './registry.js';
 import { VERSION } from './version.js';
 
@@ -251,6 +251,9 @@ async function open(args) {
   const { flags, positionals } = parse('open', args, SPECS.open);
   const target = resolve(positionals[0]);
   if (!existsSync(target)) throw new AxiError(`artifact not found: ${display(target)}`, 'NOT_FOUND', ['Write the artifact first, then run `kaya open <file>`']);
+  if (!isReviewableFile(target)) {
+    throw new AxiError(`${display(target)} is not an HTML or Markdown file`, 'VALIDATION_ERROR', ['Kaya reviews .html, .htm, .md and .markdown files only']);
+  }
 
   // A review already running on a per-file server from an older kaya stays put.
   const legacy = await legacyOrigin(target);

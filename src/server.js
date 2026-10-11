@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { injectOverlay, injectBaseTheme, injectTitle } from './overlay.js';
 import { injectFavicon } from './favicon.js';
@@ -54,11 +54,66 @@ function body(request) {
   });
 }
 
+function inside(root, candidate) {
+  return candidate === root || candidate.startsWith(`${root}${sep}`);
+}
+
+// Assets are served only from inside the artifact's own folder, judged after
+// symlinks are resolved. Checking the path alone let a link inside the folder
+// (innocent.png -> ~/.ssh/id_rsa) serve any file on the machine.
 function safeAssetPath(root, pathname) {
-  const relative = decodeURIComponent(pathname.replace(/^\//, ''));
+  let relative;
+  try { relative = decodeURIComponent(pathname.replace(/^\//, '')); } catch (_error) { return undefined; }
   const candidate = resolve(root, relative);
-  if (candidate !== root && !candidate.startsWith(`${root}${sep}`)) return undefined;
-  return candidate;
+  if (!inside(root, candidate)) return undefined;
+  try {
+    const realRoot = realpathSync(root);
+    const real = realpathSync(candidate);
+    return inside(realRoot, real) ? real : undefined;
+  } catch (_error) { return undefined; }
+}
+
+const ARTIFACT_EXTENSIONS = /\.(html?|md|markdown)$/i;
+
+// Only an HTML or Markdown file, after symlinks are resolved, can become a
+// review. Anything else - a key, a config file, a database - is refused, so a
+// review cannot be pointed at a file it has no business serving.
+export function isReviewableFile(file) {
+  if (!ARTIFACT_EXTENSIONS.test(String(file || ''))) return false;
+  try {
+    const real = realpathSync(resolve(file));
+    return ARTIFACT_EXTENSIONS.test(real) && statSync(real).isFile();
+  } catch (_error) { return false; }
+}
+
+// Requests have to come from this machine, addressed to this machine.
+// - Host: a DNS-rebinding page names its own domain while resolving to
+//   127.0.0.1, so anything but a loopback name is refused.
+// - Cross-site: a page on another site can still make the browser send a form
+//   POST here. Browsers label those, so they are refused for the review API.
+//   Opening a review's page from a link elsewhere stays allowed; that is just
+//   navigation, and the page cannot be read across sites anyway.
+// The kaya CLI sends neither header, so it is unaffected.
+const LOOPBACK_HOST = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i;
+export function rejectForeignRequest(request, response, apiPath) {
+  const host = String(request.headers.host || '');
+  if (!LOOPBACK_HOST.test(host)) {
+    json(response, 403, { error: 'requests must address this machine directly' });
+    return true;
+  }
+  if (!apiPath) return false;
+  const site = String(request.headers['sec-fetch-site'] || '');
+  const origin = request.headers.origin;
+  let foreignOrigin = false;
+  if (origin) {
+    try { foreignOrigin = !(LOOPBACK_HOST.test(new URL(origin).host) && new URL(origin).host === host); }
+    catch (_error) { foreignOrigin = true; }
+  }
+  if (site === 'cross-site' || site === 'same-site' || foreignOrigin) {
+    json(response, 403, { error: 'cross-site request refused' });
+    return true;
+  }
+  return false;
 }
 
 // The original plain-text poll format, kept byte-compatible for clients that
@@ -543,7 +598,11 @@ export class KayaReviewServer extends ReviewSession {
   start() {
     if (this.server) return Promise.resolve(this);
     if (!existsSync(this.file) || !statSync(this.file).isFile()) throw new Error(`artifact not found: ${this.file}`);
-    this.server = createServer((request, response) => this.handle(request, response));
+    this.server = createServer((request, response) => {
+      const path = String(request.url || '/').split('?')[0];
+      if (rejectForeignRequest(request, response, path.startsWith('/__kaya/') || request.method !== 'GET')) return;
+      this.handle(request, response);
+    });
     return new Promise((resolveStart, rejectStart) => {
       this.server.once('error', rejectStart);
       this.server.listen(this.port, this.host, () => {
@@ -588,7 +647,7 @@ export class KayaDaemon {
   start() {
     // Reviews survive a restart: reload every one that was open.
     for (const entry of listSessionStates()) {
-      if (existsSync(entry.file)) this.known.set(urlKeyFor(entry.file), entry.file);
+      if (isReviewableFile(entry.file)) this.known.set(urlKeyFor(entry.file), entry.file);
     }
     this.server = createServer((request, response) => this.handle(request, response));
     return new Promise((resolveStart, rejectStart) => {
@@ -607,7 +666,7 @@ export class KayaDaemon {
   session(urlKey) {
     if (this.sessions.has(urlKey)) return this.sessions.get(urlKey);
     const file = this.known.get(urlKey);
-    if (!file || !existsSync(file)) return undefined;
+    if (!file || !isReviewableFile(file)) return undefined;
     const session = new ReviewSession(file, {
       prefix: `/s/${urlKey}`,
       persist: true,
@@ -621,6 +680,7 @@ export class KayaDaemon {
 
   open(file) {
     const target = resolve(file);
+    if (!isReviewableFile(target)) throw new Error('only HTML or Markdown files can be reviewed');
     const urlKey = urlKeyFor(target);
     const created = !this.known.has(urlKey);
     if (created) {
@@ -670,9 +730,11 @@ export class KayaDaemon {
   }
 
   async handle(request, response) {
-    this.lastUsed = Date.now();
     const url = new URL(request.url || '/', this.address());
     const mounted = url.pathname.match(/^\/s\/([0-9a-f]{12})(\/.*)?$/);
+    const apiPath = url.pathname.startsWith('/__kaya/') || Boolean(mounted && mounted[2] && mounted[2].startsWith('/__kaya/')) || request.method !== 'GET';
+    if (rejectForeignRequest(request, response, apiPath)) return;
+    this.lastUsed = Date.now();
     if (mounted) {
       // The trailing slash matters: without it, an artifact's relative asset
       // paths resolve against /s/ instead of its own directory.
@@ -691,6 +753,7 @@ export class KayaDaemon {
       try {
         const data = JSON.parse(await body(request));
         if (!data || typeof data.file !== 'string' || !existsSync(data.file)) return json(response, 400, { error: 'file does not exist' });
+        if (!isReviewableFile(data.file)) return json(response, 400, { error: 'only HTML or Markdown files can be reviewed' });
         return json(response, 200, this.open(data.file));
       } catch (error) { return json(response, 400, { error: error instanceof Error ? error.message : 'invalid JSON' }); }
     }

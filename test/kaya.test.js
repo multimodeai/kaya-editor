@@ -915,3 +915,71 @@ describe('the installable skill', () => {
     expect(JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).files).toContain('skills');
   });
 });
+
+describe('the server only serves what it should, to whom it should', () => {
+  // Without these, a website the user visited could make their browser register
+  // any file (an SSH key) as a review and, via DNS rebinding, read it back.
+  async function daemonWith(files) {
+    const state = mkdtempSync(join(tmpdir(), 'kaya-sec-state-'));
+    tempDirs.push(state);
+    process.env.KAYA_STATE_DIR = state;
+    const { KayaDaemon } = await import('../src/server.js');
+    const daemon = new KayaDaemon({ port: 0, idleMs: 60_000 });
+    await daemon.start();
+    return daemon;
+  }
+  afterEach(() => { delete process.env.KAYA_STATE_DIR; });
+
+  it('regression: a symlink inside the artifact folder cannot serve a file outside it', async () => {
+    const { directory, file } = fixture();
+    const outside = mkdtempSync(join(tmpdir(), 'kaya-outside-'));
+    tempDirs.push(outside);
+    writeFileSync(join(outside, 'secret'), 'PRIVATE KEY MATERIAL');
+    const { symlinkSync } = await import('node:fs');
+    symlinkSync(join(outside, 'secret'), join(directory, 'innocent.png'));
+    writeFileSync(join(directory, 'real.png'), 'fine');
+    const daemon = await daemonWith();
+    try {
+      const url = daemon.open(file).url;
+      const leaked = await fetch(`${url}innocent.png`);
+      expect(leaked.status).toBe(404);
+      expect(await leaked.text()).not.toContain('PRIVATE');
+      expect((await fetch(`${url}real.png`)).status).toBe(200);   // real assets still served
+    } finally { await daemon.shutdown(); }
+  });
+
+  it('regression: only HTML or Markdown files can become a review', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'kaya-key-'));
+    tempDirs.push(outside);
+    writeFileSync(join(outside, 'id_rsa'), 'PRIVATE KEY MATERIAL');
+    const daemon = await daemonWith();
+    try {
+      const refused = await fetch(`${daemon.address()}__kaya/open`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ file: join(outside, 'id_rsa') }),
+      });
+      expect(refused.status).toBe(400);
+      expect(() => daemon.open(join(outside, 'id_rsa'))).toThrow(/HTML or Markdown/);
+    } finally { await daemon.shutdown(); }
+  });
+
+  it('regression: refuses a foreign Host (DNS rebinding) and cross-site requests to the API', async () => {
+    const { file } = fixture();
+    const daemon = await daemonWith();
+    try {
+      const url = daemon.open(file).url;
+      const http = await import('node:http');
+      const raw = (path, headers, method = 'GET') => new Promise((done) => {
+        const u = new URL(path, daemon.address());
+        const req = http.request({ host: '127.0.0.1', port: u.port, path: u.pathname, method, headers }, (res) => { res.resume(); done(res.statusCode); });
+        req.end(method === 'POST' ? '{"file":"x"}' : undefined);
+      });
+      expect(await raw(url, { host: `evil.example:${daemon.port}` })).toBe(403);
+      expect(await raw('/__kaya/open', { host: `127.0.0.1:${daemon.port}`, origin: 'https://evil.example', 'content-type': 'text/plain' }, 'POST')).toBe(403);
+      expect(await raw(`${url}__kaya/state`, { host: `127.0.0.1:${daemon.port}`, 'sec-fetch-site': 'cross-site' })).toBe(403);
+      // what must keep working: the page itself, opened from a link elsewhere, and the overlay's own calls
+      expect(await raw(url, { host: `127.0.0.1:${daemon.port}`, 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate' })).toBe(200);
+      expect(await raw(`${url}__kaya/state`, { host: `localhost:${daemon.port}`, 'sec-fetch-site': 'same-origin', origin: `http://localhost:${daemon.port}` })).toBe(200);
+    } finally { await daemon.shutdown(); }
+  });
+});
