@@ -236,6 +236,20 @@ export class ReviewSession {
     }
   }
 
+  // Each note's place in the loop, shown on the reviewer's own message: sent,
+  // seen by the agent, then the outcome its receipt gave it.
+  setNoteStatus(ids, status, notes = {}) {
+    let changed = false;
+    for (const entry of this.history) {
+      if (entry.role !== 'you' || !entry.id || !ids.includes(entry.id)) continue;
+      if (entry.status === status && !notes[entry.id]) continue;
+      entry.status = status;
+      if (notes[entry.id]) entry.statusNote = notes[entry.id];
+      changed = true;
+    }
+    if (changed) this.persistHistory();
+  }
+
   // Record an agent's reply, plus a receipt that accounts for delivered notes by
   // id. Returns which delivered notes are still unaccounted for, so an agent that
   // answered only some of a batch is told exactly which ones it skipped.
@@ -244,6 +258,10 @@ export class ReviewSession {
     for (const entry of receipt) {
       if (!entry || typeof entry.id !== 'string') continue;
       if (this.outstanding.delete(entry.id)) accounted.push(entry);
+    }
+    for (const outcome of ['addressed', 'deferred', 'rejected']) {
+      const these = accounted.filter((e) => e.outcome === outcome);
+      if (these.length) this.setNoteStatus(these.map((e) => e.id), outcome, Object.fromEntries(these.filter((e) => e.note).map((e) => [e.id, e.note])));
     }
     const lines = accounted.map((e) => `[${e.outcome}] ${e.id}${e.note ? ` - ${e.note}` : ''}`);
     const body = [text, ...lines].filter(Boolean).join('\n');
@@ -282,6 +300,7 @@ export class ReviewSession {
     }));
     const snapshot = feedback.length && this.snapshot ? this.snapshot : null;
     for (const item of feedback) if (item.id) this.outstanding.add(item.id);
+    if (feedback.length) this.setNoteStatus(feedback.map((item) => item.id).filter(Boolean), 'seen');
     if (feedback.length) { this.snapshot = undefined; this.persistState(); }
     return {
       ended: Boolean(result.ended),
@@ -333,6 +352,7 @@ export class ReviewSession {
     if (!items.length) return;
     this.queue.unshift(...items);
     for (const item of items) if (item.id) this.outstanding.delete(item.id);
+    this.setNoteStatus(items.map((item) => item.id).filter(Boolean), 'sent');
     this.persistState();
     this.notify();
   }
@@ -524,7 +544,7 @@ export class ReviewSession {
         for (const { item, ref } of prepared) {
           item.id = `n${++this.seq}`;
           this.queue.push(item);
-          this.history.push({ role: 'you', id: item.id, text: item.text, ref });
+          this.history.push({ role: 'you', id: item.id, text: item.text, ref, status: 'sent' });
         }
         if (endSession) { this.ended = true; this.endedBy = 'user'; }
         // Everything this client had queued went out in this batch, so its last

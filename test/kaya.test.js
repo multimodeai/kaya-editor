@@ -983,3 +983,46 @@ describe('the server only serves what it should, to whom it should', () => {
     } finally { await daemon.shutdown(); }
   });
 });
+
+describe('per-note delivery status', () => {
+  it('a note moves from sent, to seen, to the outcome its receipt gave it', async () => {
+    const { file } = fixture();
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+    const status = async () => (await (await fetch(`${server.address()}__kaya/state`)).json()).history.filter((h) => h.role === 'you').map((h) => [h.id, h.status, h.statusNote || null]);
+    await fetch(`${server.address()}__kaya/feedback`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ items: [{ text: 'one' }, { text: 'two' }] }) });
+    expect(await status()).toEqual([['n1', 'sent', null], ['n2', 'sent', null]]);
+    await fetch(`${server.address()}__kaya/poll?format=json`);
+    expect(await status()).toEqual([['n1', 'seen', null], ['n2', 'seen', null]]);
+    await fetch(`${server.address()}__kaya/reply`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'done', receipt: [{ id: 'n1', outcome: 'addressed', note: 'fixed' }, { id: 'n2', outcome: 'deferred' }] }) });
+    expect(await status()).toEqual([['n1', 'addressed', 'fixed'], ['n2', 'deferred', null]]);
+  });
+});
+
+describe('annotate mode in the review page', () => {
+  it('links are annotatable and followed with Cmd/Ctrl; form controls and ARIA widgets keep working', async () => {
+    const { OVERLAY_SCRIPT } = await import('../src/overlay.js');
+    const native = OVERLAY_SCRIPT.slice(OVERLAY_SCRIPT.indexOf('function isNative'), OVERLAY_SCRIPT.indexOf('function isSvg'));
+    expect(native).not.toMatch(/closest\("a,|closest\('a,/);          // a plain link click no longer navigates away
+    for (const role of ['button', 'checkbox', 'tab', 'switch', 'menuitem', 'option', 'treeitem']) expect(OVERLAY_SCRIPT).toContain(`[role='${role}']`);
+    expect(OVERLAY_SCRIPT).toContain("(e.metaKey||e.ctrlKey) && e.target.closest && e.target.closest('a[href]')");
+  });
+
+  it('an artifact can start Annotate on; the reviewer\'s own choice wins and survives reloads', async () => {
+    const { OVERLAY_SCRIPT, overlayMarkup } = await import('../src/overlay.js');
+    expect(OVERLAY_SCRIPT).toContain("html.getAttribute('data-kaya-annotate')");
+    expect(OVERLAY_SCRIPT).toContain('sessionStorage.setItem(MODE_KEY');
+    // the internal checkbox must not share the public artifact attribute
+    expect(OVERLAY_SCRIPT).toContain('data-kaya-annotate-toggle');
+    expect(OVERLAY_SCRIPT).not.toMatch(/checkbox" data-kaya-annotate>/);
+    expect(overlayMarkup('/tmp/x.html')).not.toContain('__KAYA_SESSION_KEY__');   // both keys substituted
+  });
+
+  it('a queued note can be edited in place before it is sent', async () => {
+    const { OVERLAY_SCRIPT } = await import('../src/overlay.js');
+    expect(OVERLAY_SCRIPT).toContain('data-edit="');
+    expect(OVERLAY_SCRIPT).toContain("popQueueBtn.textContent = editing ? 'Save' : 'Queue'");
+    expect(OVERLAY_SCRIPT).toMatch(/findIndex\(function\(it\)\{ return it\.selector===selector && !it\.selectedText; \}\)/);
+  });
+});

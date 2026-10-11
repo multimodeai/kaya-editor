@@ -3,7 +3,9 @@
 Review an HTML or Markdown artifact in your browser, annotate it, and send the
 feedback back to the agent that wrote it. Everything runs on your machine.
 
-No account, no upload, no third-party host, no telemetry. One small local server
+No account, no upload, no third-party host, no telemetry. The server answers only
+this machine, refuses requests from other websites, and serves only HTML or Markdown
+artifacts and the files beside them. One small local server
 hosts every review and injects a review overlay over each artifact.
 
 ```bash
@@ -55,10 +57,15 @@ rewritten, so tooling that parses your raw Markdown keeps working.
 
 - **Annotate**: toggle it on, click an element or select text, write a note. Notes
   queue up; send them as one batch. Paste or drop an image onto a note to attach it.
+  Click a queued note, or the element it is on, to edit it before sending. A click on
+  a link annotates it (Cmd/Ctrl-click follows it); buttons, fields, tabs and toggles
+  keep working. An artifact can start in annotate mode with
+  `<html data-kaya-annotate="on">`; your own toggle wins and is remembered.
 - **Zoom**: hover a diagram, image or SVG for a zoom control. Wheel to zoom, drag to
   pan. With Annotate on, click a node inside the zoom to comment on it.
 - **Conversation**: the agent's replies and your notes, in order. Each note shows its
-  id, and the agent's receipt marks each one addressed, deferred or rejected.
+  id and where it is: waiting for the agent, seen, being worked on, then addressed,
+  deferred or rejected as the agent's receipt says.
 - **Agent presence**: the header says whether an agent is listening, working, has
   replied, or whether nothing is listening at all, so notes are never sent into a
   void without you knowing.

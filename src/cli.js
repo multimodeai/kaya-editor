@@ -581,6 +581,10 @@ writing the artifact:
   inside their own container. Show real UI as a screenshot rather than describing it.
   Match the design system of the project the artifact is ABOUT, or the look the user
   asked for; write self-contained CSS only when neither exists, and say which you used.
+  Annotate starts off. Put <html data-kaya-annotate="on"> on a layout or frontend the
+  user should mark up, and leave it off for a page of choices to click; the reviewer's
+  own toggle overrides it and is remembered. In annotate mode a click on a link
+  annotates it (Cmd/Ctrl-click follows it); form controls and ARIA widgets still work.
   Mermaid in a .mermaid or fenced block renders automatically, read-only.
   <div data-kaya-ask="id" data-kaya-label="Question?" data-kaya-options="a|b|c">
   renders one-click choices whose answers come back typed, as [ask] id = value.

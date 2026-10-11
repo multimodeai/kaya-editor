@@ -13,6 +13,9 @@ export const OVERLAY_SCRIPT = `
   // an origin-only key can restore one file's notes onto a different artifact.
   // sessionStorage also clears when the tab closes, the right lifetime for unsent notes.
   const STAGE_KEY='kaya:staged:' + '__KAYA_SESSION_KEY__';
+  // The reviewer's own Annotate on/off choice, kept across artifact reloads so a
+  // revision landing does not flip them out of the mode they were working in.
+  const MODE_KEY='kaya:annotate:' + '__KAYA_SESSION_KEY__';
   function saveStage(){
     try{ sessionStorage.setItem(STAGE_KEY, JSON.stringify({ queued: state.queued, draft: composerInput ? composerInput.value : '' })); }
     catch(_e){ /* private mode / quota - staging is best-effort, never block the UI */ }
@@ -33,7 +36,7 @@ export const OVERLAY_SCRIPT = `
   nav.innerHTML = '<div class="kaya-brandwrap"><span class="kaya-brand">Kaya</span><span class="kaya-brand-sub">Editor</span></div>'
     + '<div class="kaya-nav-right">'
     + '<button class="kaya-overflowbtn" data-overflow style="display:none">0 layout issues</button>'
-    + '<label class="kaya-toggle"><input type="checkbox" data-kaya-annotate><span class="kaya-switch"></span>Annotate</label>'
+    + '<label class="kaya-toggle"><input type="checkbox" data-kaya-annotate-toggle><span class="kaya-switch"></span>Annotate</label>'
     + '<div class="kaya-reviewswrap" data-reviews-wrap style="display:none"><button class="kaya-reviewsbtn" data-reviews-btn>Reviews</button><div class="kaya-reviews" data-reviews></div></div>'
     + '<div class="kaya-menuwrap"><button class="kaya-menubtn" data-menu-btn aria-label="Menu">\\u22ee</button>'
     + '<div class="kaya-menu" data-menu>'
@@ -67,7 +70,7 @@ export const OVERLAY_SCRIPT = `
   const q = function(sel,r){ return (r||convo).querySelector(sel); };
   const logEl = q('[data-log]'); const composerInput = q('[data-input]'); const pendingEl = q('[data-pending]'); const countEl = q('[data-count]');
   const presenceEl = q('[data-presence]'); const noListenEl = q('[data-nolisten]');
-  const annBox = nav.querySelector('[data-kaya-annotate]');
+  const annBox = nav.querySelector('[data-kaya-annotate-toggle]');
   const overflowBtn = nav.querySelector('[data-overflow]');
   if(overflowBtn) overflowBtn.addEventListener('click', cycleOverflow);
   const popHead = pop.querySelector('[data-pop-head]'); const popInput = pop.querySelector('[data-pop-input]');
@@ -83,7 +86,19 @@ export const OVERLAY_SCRIPT = `
   layout(); window.addEventListener('resize', layout);
 
   function isOurs(el){ return !el || root.contains(el); }
-  function isNative(el){ return el && el.closest && el.closest('a,button,input,select,textarea,label,summary,[contenteditable],[data-kaya-action]'); }
+  // Controls keep working in annotate mode so the page stays usable: form fields
+  // and anything built as an ARIA widget (tabs, toggles, menus). Links are NOT in
+  // this list: a plain click annotates a link, and Cmd/Ctrl-click follows it.
+  // Before, any click on a link in annotate mode navigated away from the review.
+  const WIDGET_ROLES="[role='button'],[role='checkbox'],[role='combobox'],[role='menuitem'],[role='menuitemcheckbox'],[role='menuitemradio'],[role='option'],[role='radio'],[role='switch'],[role='tab'],[role='treeitem']";
+  function isNative(el){
+    if(!el || !el.closest) return false;
+    if(el.closest("button,input,select,textarea,option,optgroup,label,summary,[contenteditable]:not([contenteditable='false']),[data-kaya-action]")) return true;
+    const widget=el.closest(WIDGET_ROLES);
+    if(!widget) return false;
+    const link=el.closest('a[href]');
+    return !(link && widget.contains(link));   // a real link inside a widget is still annotatable
+  }
   function isSvg(el){ return !!(el && el.ownerSVGElement !== undefined && el.namespaceURI==='http://www.w3.org/2000/svg'); }
   function selectorFor(element){
     if(!element || element===document.body || element===html) return 'body';
@@ -162,7 +177,14 @@ export const OVERLAY_SCRIPT = `
   }
   function hideHl(){ hl.style.display='none'; hl.classList.remove('kaya-lock'); }
 
-  annBox.addEventListener('change', function(){ state.annotate=annBox.checked; try{ syncLbMode(); }catch(_e){} html.classList.toggle('kaya-annotate', state.annotate); if(!state.annotate){ hideHl(); closePop(); } });
+  function setAnnotate(on, remember){
+    state.annotate=on; annBox.checked=on;
+    try{ syncLbMode(); }catch(_e){}
+    html.classList.toggle('kaya-annotate', on);
+    if(!on){ hideHl(); closePop(); }
+    if(remember){ try{ sessionStorage.setItem(MODE_KEY, on ? 'on' : 'off'); }catch(_e){} }
+  }
+  annBox.addEventListener('change', function(){ setAnnotate(annBox.checked, true); });
 
   document.addEventListener('mousemove', function(e){
     if(!state.annotate || pop.classList.contains('kaya-show')) return;
@@ -190,17 +212,25 @@ export const OVERLAY_SCRIPT = `
     if(!state.annotate || isOurs(e.target)) return;
     if(state.suppressClick){ state.suppressClick=false; return; }
     if(isNative(e.target)) return;
+    if((e.metaKey||e.ctrlKey) && e.target.closest && e.target.closest('a[href]')) return;  // follow the link
     const el=isSvg(e.target)?svgTarget(e.target):e.target; const r=el.getBoundingClientRect();
     if(coversPage(el, r)) return;  // never annotate the whole page - let the click pass through
     e.preventDefault(); e.stopPropagation();
     placeHl(r, true);
-    openPop(e.clientX, e.clientY, refFor(el), { selector:selectorFor(el), anchorText:anchorTextOf(el) });
+    const selector=selectorFor(el);
+    // Clicking something that already has a queued note reopens that note
+    // rather than stacking a second one on the same element.
+    const existing=state.queued.findIndex(function(it){ return it.selector===selector && !it.selectedText; });
+    openPop(e.clientX, e.clientY, refFor(el), { selector:selector, anchorText:anchorTextOf(el) }, existing===-1 ? null : existing);
   }, true);
 
-  function openPop(x, y, ref, ctx){
+  function openPop(x, y, ref, ctx, editIndex){
     state.ctx=ctx; state.ref=ref;
-    popHead.innerHTML='Annotate <b>'+esc(ref)+'</b>';
-    popInput.value='';
+    state.editing = editIndex==null ? null : editIndex;
+    const editing = state.editing!=null && state.queued[state.editing];
+    popHead.innerHTML=(editing ? 'Edit note on ' : 'Annotate ')+'<b>'+esc(ref||'your message')+'</b>';
+    popInput.value = editing ? (editing.note||'') : '';
+    popQueueBtn.textContent = editing ? 'Save' : 'Queue';
     if(state.showAttachCount) state.showAttachCount();
     pop.classList.add('kaya-show');
     const pw=pop.offsetWidth||322, ph=pop.offsetHeight||190;
@@ -210,7 +240,7 @@ export const OVERLAY_SCRIPT = `
     popInput.focus();
   }
   function closePop(){
-    pop.classList.remove('kaya-show'); state.ctx=null; state.ref=null; hideHl();
+    pop.classList.remove('kaya-show'); state.ctx=null; state.ref=null; state.editing=null; hideHl();
     // Anything pasted onto an abandoned note is abandoned with it, or it would
     // silently reattach to whatever note is written next.
     if(state.pendingAttachments && state.pendingAttachments.length){
@@ -219,7 +249,8 @@ export const OVERLAY_SCRIPT = `
     }
   }
   pop.querySelector('[data-pop-cancel]').addEventListener('click', closePop);
-  pop.querySelector('[data-pop-queue]').addEventListener('click', function(){ queueFromPop(false); });
+  const popQueueBtn=pop.querySelector('[data-pop-queue]');
+  popQueueBtn.addEventListener('click', function(){ queueFromPop(false); });
   popInput.addEventListener('keydown', function(e){
     if(e.key==='Enter' && (e.metaKey||e.ctrlKey)){ e.preventDefault(); queueFromPop(true); }
     else if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); queueFromPop(false); }
@@ -228,6 +259,14 @@ export const OVERLAY_SCRIPT = `
   function queueFromPop(sendNow){
     const note=popInput.value.trim(); if(!note) return;
     const ctx=state.ctx||{};
+    if(state.editing!=null && state.queued[state.editing]){
+      const it=state.queued[state.editing];
+      it.note=note; it.display=note; it.agentText=note;
+      it.attachments=(it.attachments||[]).concat(state.pendingAttachments.splice(0));
+      renderPending(); closePop();
+      if(sendNow) send(false);
+      return;
+    }
     addQueued({ ref:state.ref, note:note, display:note, agentText:note, selector:ctx.selector, selectedText:ctx.selectedText,
                 anchorText:ctx.anchorText||null, anchorHash:ctx.anchorText?hashText(ctx.anchorText):null, anchorState:'ok',
                 attachments:state.pendingAttachments.splice(0) });
@@ -293,10 +332,19 @@ export const OVERLAY_SCRIPT = `
       const n=(it.attachments||[]).length;
       const clip = n ? '<span class="kaya-pi-badge kaya-att">'+n+' image'+(n===1?'':'s')+'</span>' : '';
       const ref = it.ref ? '<div class="kaya-pi-ref">'+esc(it.ref)+badge+clip+'</div>' : (badge+clip);
-      return '<div class="kaya-pitem"><div class="kaya-pi-body">'+ref+'<div class="kaya-pi-note">'+esc(it.display||it.note||'')+'</div></div><span class="kaya-pi-x" data-i="'+i+'">\\u00d7</span></div>';
+      return '<div class="kaya-pitem" data-edit="'+i+'" title="Click to edit before sending"><div class="kaya-pi-body">'+ref+'<div class="kaya-pi-note">'+esc(it.display||it.note||'')+'</div></div><span class="kaya-pi-x" data-i="'+i+'">\\u00d7</span></div>';
     }).join('');
   }
-  pendingEl.addEventListener('click', function(e){ const i=e.target && e.target.getAttribute && e.target.getAttribute('data-i'); if(i!=null){ state.queued.splice(Number(i),1); renderPending(); } });
+  pendingEl.addEventListener('click', function(e){
+    const x=e.target && e.target.getAttribute && e.target.getAttribute('data-i');
+    if(x!=null){ state.queued.splice(Number(x),1); renderPending(); return; }
+    // Anywhere else on a queued note opens it for editing before it is sent.
+    const item=e.target && e.target.closest && e.target.closest('[data-edit]');
+    if(!item) return;
+    const i=Number(item.getAttribute('data-edit')); const it=state.queued[i]; if(!it) return;
+    const r=item.getBoundingClientRect();
+    openPop(Math.max(12, r.left-340), r.top, it.ref, { selector:it.selector, selectedText:it.selectedText, anchorText:it.anchorText }, i);
+  });
 
   // Whether an agent is actually listening is invisible otherwise: the panel
   // looks identical when one is polling and when nothing is attached at all, so
@@ -316,15 +364,25 @@ export const OVERLAY_SCRIPT = `
       return '<span class="kaya-rc kaya-rc-'+outcome+'">'+outcome+'</span> <span class="kaya-nid">'+id+'</span>';
     });
   }
-  function renderHistory(hist){
-    const key=hist.length+':'+(hist.length?(hist[hist.length-1].text||'').length:0);
+  // Where each sent note is: waiting for the agent, seen by it, being worked
+  // on, then the outcome the agent's receipt gave it.
+  function statusPill(m, presence){
+    if(!m.status) return '';
+    let label=m.status, cls=m.status;
+    if(m.status==='sent'){ label='waiting for agent'; }
+    else if(m.status==='seen'){ if(presence==='working'||presence==='listening'){ label='agent working'; cls='working'; } else { label='seen by agent'; } }
+    const tip = m.statusNote ? ' title="'+esc(m.statusNote)+'"' : '';
+    return ' <span class="kaya-ns kaya-ns-'+cls+'"'+tip+'>'+esc(label)+'</span>';
+  }
+  function renderHistory(hist, presence){
+    const key=hist.length+':'+(hist.length?(hist[hist.length-1].text||'').length:0)+':'+(presence||'')+':'+hist.map(function(m){ return m.status||''; }).join(',');
     if(key===historyKey) return; historyKey=key;
     if(!hist.length){ logEl.innerHTML='<div class="kaya-empty">No messages yet.<br>Flip on <b>Annotate</b>, click a box or select some text, add a note, then <b>Send to Agent</b>.</div>'; return; }
     let round=0, out='';
     for(let k=0;k<hist.length;k++){ const m=hist[k];
       if(m.role==='agent'){ round++; out+='<div class="kaya-msg agent"><span class="kaya-who">Agent <span class="kaya-round">Round '+round+'</span></span>'+receiptHtml(m.text)+'</div>'; }
       // The id ties a note to the agent's receipt line for it ("[addressed] n3 - ...").
-      else { out+='<div class="kaya-msg you"><span class="kaya-who">You'+(m.id?' <span class="kaya-nid">'+esc(m.id)+'</span>':'')+'</span>'+(m.ref?'<span class="kaya-ref">'+esc(m.ref)+'</span>':'')+esc(m.text)+'</div>'; }
+      else { out+='<div class="kaya-msg you"><span class="kaya-who">You'+(m.id?' <span class="kaya-nid">'+esc(m.id)+'</span>':'')+statusPill(m, presence)+'</span>'+(m.ref?'<span class="kaya-ref">'+esc(m.ref)+'</span>':'')+esc(m.text)+'</div>'; }
     }
     logEl.innerHTML=out; logEl.scrollTop=logEl.scrollHeight;
   }
@@ -720,6 +778,17 @@ export const OVERLAY_SCRIPT = `
   // Mounted here, after their declarations - appending earlier hits the TDZ.
   root.appendChild(lb); root.appendChild(zoomBtn);
 
+  // Whether Annotate starts on. The reviewer's own last choice for this review
+  // wins; otherwise the artifact decides with <html data-kaya-annotate="on">
+  // (a layout to mark up) or "off" (a page of choices to click). Default off.
+  (function initialAnnotate(){
+    let saved=null;
+    try{ saved=sessionStorage.getItem(MODE_KEY); }catch(_e){}
+    const declared=(html.getAttribute('data-kaya-annotate')||'').toLowerCase();
+    const on = saved==='on' ? true : saved==='off' ? false : declared==='on';
+    if(on) setAnnotate(true, false);
+  })();
+
   document.addEventListener('mouseover', function(e){
     if(lb.classList.contains('kaya-show')) return;
     if(isOurs(e.target)) return;
@@ -740,7 +809,7 @@ export const OVERLAY_SCRIPT = `
   logEl.innerHTML='<div class="kaya-empty">No messages yet.<br>Flip on <b>Annotate</b>, click a box or select some text, add a note, then <b>Send to Agent</b>.</div>';
   async function refresh(){
     try{ const r=await fetch(base+'/state?client='+clientId+'&staged='+state.queued.length); if(!r.ok) return; const d=await r.json();
-      renderHistory(d.history||[]);
+      renderHistory(d.history||[], d.presence);
       renderPresence(d.presence);
       state.ended=Boolean(d.ended); applyEnded();
       bannerEl.classList.toggle('kaya-show', (d.clients||1) > 1 && !!d.primary && d.primary!==clientId);
@@ -774,7 +843,7 @@ function stageKeyFor(sessionKey) {
 // `base` is where this review's API lives: /__kaya for a single-file server, or
 // /s/<key>/__kaya when one shared server hosts many reviews on one port.
 export function overlayMarkup(sessionKey, base = KAYA_PREFIX) {
-  const script = OVERLAY_SCRIPT.replace('__KAYA_SESSION_KEY__', stageKeyFor(sessionKey)).replace('__KAYA_BASE__', base);
+  const script = OVERLAY_SCRIPT.replaceAll('__KAYA_SESSION_KEY__', stageKeyFor(sessionKey)).replace('__KAYA_BASE__', base);
   return `<style id="kaya-overlay-style">${OVERLAY_STYLE}</style><script id="kaya-overlay-script">${script}</script>`;
 }
 

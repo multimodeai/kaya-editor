@@ -12,10 +12,10 @@ After reviewing a delta, record decisions in the table, then run `npm run upstre
 The check script reads and rewrites this block. Keep the format.
 
 ```upstream
-lavish-axi: 0.1.80
+lavish-axi: 0.1.86
 axi-sdk-js: 0.1.13
-axi-spec: e62199508ebb
-reviewed: 2026-10-03
+axi-spec: f979358f3dbd
+reviewed: 2026-10-11
 ```
 
 | Source | What it is | Where the check reads it |
@@ -48,6 +48,13 @@ Declined items stay declined. They are recorded so the same question is not re-a
 | Idle auto-stop | lavish-axi | adopted | 30 minutes; an open tab keeps the server alive, so a review never dies under someone reading it |
 | Server replaces older running code | own | adopted | A running server used to keep its old code forever; open and poll now swap it for the current one, never a downgrade |
 | Stop refuses while notes are unsent | own | adopted | Restarting a per-file server stranded typed notes; `--force` to override |
+| Constrain sessions and assets to the artifact tree; refuse foreign hosts and cross-site requests | lavish-axi 0.1.84 | adopted | Reproduced on Kaya: a website could register any local file as a review and read it back via DNS rebinding |
+| Per-note delivery receipts (seen, working, done) | lavish-axi 0.1.83 | adapted | Text status on each of the reviewer's notes (waiting, seen, working, then the receipt's outcome) instead of emoji |
+| Edit queued annotations in place | lavish-axi 0.1.81 | adopted | Click a queued note or its element to edit it before sending |
+| Cmd/Ctrl-click follows a link in annotate mode | lavish-axi 0.1.83 | adopted | A plain click on a link used to navigate away from the review |
+| Interactive ARIA widgets pass through annotation | lavish-axi 0.1.82 | adopted | Same role list as Lavish, with its exception for a real link inside a widget |
+| Artifact declares initial annotation mode | lavish-axi 0.1.86 | adapted | `<html data-kaya-annotate="on">`; Kaya's default stays off, since its pages are mostly choices to click |
+| Excalidraw libraries in the whiteboard | lavish-axi 0.1.85 | declined | Whiteboard itself is declined |
 | Fatal render detection (`artifact_failures`) | lavish-axi | open | Not yet reviewed in depth |
 | Per-harness guidance | lavish-axi | open | Lavish special-cases Codex; not yet needed |
 | Whiteboard / Excalidraw editing | lavish-axi | declined | About 8MB of runtime for diagram redrawing nobody has asked for |
