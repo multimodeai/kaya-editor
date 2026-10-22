@@ -91,6 +91,13 @@ export const OVERLAY_SCRIPT = `
   // this list: a plain click annotates a link, and Cmd/Ctrl-click follows it.
   // Before, any click on a link in annotate mode navigated away from the review.
   const WIDGET_ROLES="[role='button'],[role='checkbox'],[role='combobox'],[role='menuitem'],[role='menuitemcheckbox'],[role='menuitemradio'],[role='option'],[role='radio'],[role='switch'],[role='tab'],[role='treeitem']";
+  // Cmd-click opens a link on a Mac, Ctrl-click elsewhere. On a Mac, Ctrl-click
+  // is the right-click gesture, so it must never be read as "follow".
+  const IS_MAC=/Mac|iPhone|iPad/.test(navigator.platform||navigator.userAgent||'');
+  function followKey(e){ return IS_MAC ? e.metaKey : e.ctrlKey; }
+  // Enter that confirms an input-method conversion (Chinese, Japanese, Korean)
+  // is part of typing the word, not a request to queue or send the note.
+  function composing(e){ return e.isComposing || e.keyCode===229; }
   function isNative(el){
     if(!el || !el.closest) return false;
     if(el.closest("button,input,select,textarea,option,optgroup,label,summary,[contenteditable]:not([contenteditable='false']),[data-kaya-action]")) return true;
@@ -212,7 +219,7 @@ export const OVERLAY_SCRIPT = `
     if(!state.annotate || isOurs(e.target)) return;
     if(state.suppressClick){ state.suppressClick=false; return; }
     if(isNative(e.target)) return;
-    if((e.metaKey||e.ctrlKey) && e.target.closest && e.target.closest('a[href]')) return;  // follow the link
+    if(followKey(e) && e.target.closest && e.target.closest('a[href]')) return;  // follow the link
     const el=isSvg(e.target)?svgTarget(e.target):e.target; const r=el.getBoundingClientRect();
     if(coversPage(el, r)) return;  // never annotate the whole page - let the click pass through
     e.preventDefault(); e.stopPropagation();
@@ -252,6 +259,7 @@ export const OVERLAY_SCRIPT = `
   const popQueueBtn=pop.querySelector('[data-pop-queue]');
   popQueueBtn.addEventListener('click', function(){ queueFromPop(false); });
   popInput.addEventListener('keydown', function(e){
+    if(composing(e)) return;
     if(e.key==='Enter' && (e.metaKey||e.ctrlKey)){ e.preventDefault(); queueFromPop(true); }
     else if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); queueFromPop(false); }
     else if(e.key==='Escape'){ e.preventDefault(); closePop(); }
@@ -527,7 +535,7 @@ export const OVERLAY_SCRIPT = `
   }
   sendBtn.addEventListener('click', function(){ send(false); });
   endBtn.addEventListener('click', function(){ send(true); });
-  composerInput.addEventListener('keydown', function(e){ if(e.key==='Enter' && (e.metaKey||e.ctrlKey)){ e.preventDefault(); send(false); } });
+  composerInput.addEventListener('keydown', function(e){ if(composing(e)) return; if(e.key==='Enter' && (e.metaKey||e.ctrlKey)){ e.preventDefault(); send(false); } });
 
   // ---- navbar overflow menu ----
   const menu = nav.querySelector('[data-menu]');

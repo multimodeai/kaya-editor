@@ -12,10 +12,10 @@ After reviewing a delta, record decisions in the table, then run `npm run upstre
 The check script reads and rewrites this block. Keep the format.
 
 ```upstream
-lavish-axi: 0.1.86
+lavish-axi: 0.1.90
 axi-sdk-js: 0.1.13
-axi-spec: f979358f3dbd
-reviewed: 2026-10-11
+axi-spec: 0374ba4118d4
+reviewed: 2026-10-22
 ```
 
 | Source | What it is | Where the check reads it |
@@ -54,6 +54,10 @@ Declined items stay declined. They are recorded so the same question is not re-a
 | Cmd/Ctrl-click follows a link in annotate mode | lavish-axi 0.1.83 | adopted | A plain click on a link used to navigate away from the review |
 | Interactive ARIA widgets pass through annotation | lavish-axi 0.1.82 | adopted | Same role list as Lavish, with its exception for a real link inside a widget |
 | Artifact declares initial annotation mode | lavish-axi 0.1.86 | adapted | `<html data-kaya-annotate="on">`; Kaya's default stays off, since its pages are mostly choices to click |
+| Configurable browser-disconnect grace | lavish-axi 0.1.90 | adopted | `KAYA_DISCONNECT_GRACE_MS`; default stays 15s |
+| Adopt a running server newer than the CLI | lavish-axi 0.1.87 | already had | Kaya never replaces a newer running server with an older one, since 0.3.0 |
+| Ignore the Enter that confirms an IME conversion | lavish-axi 0.1.89 | adopted | Reproduced on Kaya: Enter confirming a Chinese/Japanese word queued a half-typed note |
+| Cmd-click follows links on macOS only, Ctrl-click elsewhere | lavish-axi 0.1.88 | adopted | On a Mac Ctrl-click is right-click; on Windows/Linux only Ctrl should follow |
 | Excalidraw libraries in the whiteboard | lavish-axi 0.1.85 | declined | Whiteboard itself is declined |
 | Fatal render detection (`artifact_failures`) | lavish-axi | open | Not yet reviewed in depth |
 | Per-harness guidance | lavish-axi | open | Lavish special-cases Codex; not yet needed |

@@ -1006,7 +1006,8 @@ describe('annotate mode in the review page', () => {
     const native = OVERLAY_SCRIPT.slice(OVERLAY_SCRIPT.indexOf('function isNative'), OVERLAY_SCRIPT.indexOf('function isSvg'));
     expect(native).not.toMatch(/closest\("a,|closest\('a,/);          // a plain link click no longer navigates away
     for (const role of ['button', 'checkbox', 'tab', 'switch', 'menuitem', 'option', 'treeitem']) expect(OVERLAY_SCRIPT).toContain(`[role='${role}']`);
-    expect(OVERLAY_SCRIPT).toContain("(e.metaKey||e.ctrlKey) && e.target.closest && e.target.closest('a[href]')");
+    expect(OVERLAY_SCRIPT).toContain("followKey(e) && e.target.closest && e.target.closest('a[href]')");
+    expect(OVERLAY_SCRIPT).toContain('return IS_MAC ? e.metaKey : e.ctrlKey;');
   });
 
   it('an artifact can start Annotate on; the reviewer\'s own choice wins and survives reloads', async () => {
@@ -1024,5 +1025,13 @@ describe('annotate mode in the review page', () => {
     expect(OVERLAY_SCRIPT).toContain('data-edit="');
     expect(OVERLAY_SCRIPT).toContain("popQueueBtn.textContent = editing ? 'Save' : 'Queue'");
     expect(OVERLAY_SCRIPT).toMatch(/findIndex\(function\(it\)\{ return it\.selector===selector && !it\.selectedText; \}\)/);
+  });
+});
+
+describe('typing with an input method', () => {
+  it('regression: the Enter that confirms an IME conversion never queues or sends a note', async () => {
+    const { OVERLAY_SCRIPT } = await import('../src/overlay.js');
+    expect(OVERLAY_SCRIPT).toContain('function composing(e){ return e.isComposing || e.keyCode===229; }');
+    expect(OVERLAY_SCRIPT.match(/if\(composing\(e\)\) return;/g).length).toBe(2);   // note popup and message box
   });
 });

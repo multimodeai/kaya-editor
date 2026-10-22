@@ -24,7 +24,8 @@ const MIME_TYPES = {
 const CLIENT_STALE_MS = 6000;
 // A reload drops the heartbeat for about a second, so the disconnect signal has
 // to wait longer than that before calling a tab gone.
-const DISCONNECT_GRACE_MS = 15000;
+// KAYA_DISCONNECT_GRACE_MS lengthens it for slow machines or flaky connections.
+const DISCONNECT_GRACE_MS = Number(process.env.KAYA_DISCONNECT_GRACE_MS) > 0 ? Number(process.env.KAYA_DISCONNECT_GRACE_MS) : 15000;
 const WORKING_WINDOW_MS = 5 * 60 * 1000;
 const SWEEP_MS = 2000;
 const SNAPSHOT_CAP_BYTES = 2 * 1024 * 1024;
