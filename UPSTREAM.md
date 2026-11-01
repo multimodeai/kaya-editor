@@ -7,6 +7,11 @@ This file is the memory between checks: what was reviewed, and what was decided.
 Run `npm run upstream` to see only what changed since the baselines below.
 After reviewing a delta, record decisions in the table, then run `npm run upstream -- --mark` to move the baselines forward.
 
+This happens on its own every Monday: `scripts/upstream-auto.sh` (a launchd job) has Claude Code work through the delta in a throwaway worktree, following `scripts/upstream-auto.md`.
+The script then re-checks the result itself (clean commit, baselines moved, tests pass, version bumped if code changed) before it fast-forwards master, pushes and tags.
+If any check fails, master is left alone, the work stays on its `upstream/...` branch, and a GitHub issue explains why.
+Items marked `open` below are the ones the agent left for a human decision.
+
 ## Baselines
 
 The check script reads and rewrites this block. Keep the format.
