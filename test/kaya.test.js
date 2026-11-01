@@ -1035,3 +1035,88 @@ describe('typing with an input method', () => {
     expect(OVERLAY_SCRIPT.match(/if\(composing\(e\)\) return;/g).length).toBe(2);   // note popup and message box
   });
 });
+
+describe('the overlay goes where a browser sees the end of the body', () => {
+  it('regression: a "</body>" inside a script string, comment or attribute is not the end tag', async () => {
+    const { endTagIndex } = await import('../src/overlay.js');
+    const at = (html) => endTagIndex(html, 'body');
+    expect(at('<body><p>x</p></body>')).toBe(14);
+    expect(at('<body><script>var a="</body>";</script></body>')).toBe(39);
+    expect(at('<body><!-- </body> --></body>')).toBe(22);
+    expect(at('<body><div title="a > </body>"></div></body>')).toBe(37);
+    expect(at('<body><template><p></body></p></template></body>')).toBe(41);
+    expect(at('<body><textarea></body></textarea></BODY >')).toBe(34);
+    expect(at('<body><script>never closed </body>')).toBe(-1);
+  });
+
+  it('regression: an artifact script that mentions </body> keeps working and the overlay still loads', async () => {
+    // Reproduced on Kaya 0.4.1: the overlay was pasted into the string, its own
+    // </script> closed the artifact's script early, and neither of them ran.
+    const { file } = fixture('<!doctype html><html><head><title>t</title></head><body><div class="mermaid">flowchart TD\nA-->B</div><script>var tpl = "<p>card</p></body>";</script></body></html>');
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+    const page = await (await fetch(server.address())).text();
+    expect(page).toContain('var tpl = "<p>card</p></body>";</script>');
+    const scriptEnd = page.indexOf('</body>";</script>') + '</body>";</script>'.length;
+    expect(page.indexOf('id="kaya-overlay-script"')).toBeGreaterThan(scriptEnd);
+    expect(page.indexOf('data-kaya-mermaid-runtime=')).toBeGreaterThan(scriptEnd);
+  });
+});
+
+describe('keys typed into Kaya stay in Kaya', () => {
+  it('regression: an artifact key handler cannot cancel what is typed into a note', async () => {
+    const { OVERLAY_SCRIPT } = await import('../src/overlay.js');
+    expect(OVERLAY_SCRIPT).toContain("['keydown','keypress','keyup'].forEach(function(type){ root.addEventListener(type, function(e){ e.stopPropagation(); }); });");
+  });
+});
+
+describe('unsent notes in another tab', () => {
+  it('each tab is told how many unsent notes the OTHER tabs hold, and a closing tab signs off', async () => {
+    const { file } = fixture();
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+    const state = async (query) => (await fetch(`${server.address()}__kaya/state?${query}`)).json();
+    await state('client=a&staged=2');
+    const b = await state('client=b&staged=0');
+    expect(b.staged).toBe(2);
+    expect(b.stagedElsewhere).toBe(2);
+    expect((await state('client=a&staged=2')).stagedElsewhere).toBe(0);   // its own notes are not "elsewhere"
+    // a reload restores the notes under a new client id; the old one must not count twice
+    await state('client=a&leaving=1');
+    await state('client=a2&staged=2');
+    const after = await state('client=b&staged=0');
+    expect(after.clients).toBe(2);
+    expect(after.stagedElsewhere).toBe(2);
+  });
+
+  it('regression: Send & End from an empty tab no longer ends the review while another tab holds notes', async () => {
+    const { OVERLAY_SCRIPT } = await import('../src/overlay.js');
+    expect(OVERLAY_SCRIPT).toContain('if(elsewhere && (endAfter || (!msg && !state.queued.length))){');
+    expect(OVERLAY_SCRIPT).toContain('choose End session in the');
+    expect(OVERLAY_SCRIPT).toContain("They stay in that tab: send them from there.");
+    expect(OVERLAY_SCRIPT).toContain("'/state?client='+clientId+'&leaving=1'");
+  });
+});
+
+describe('the conversation panel folds away on a wide screen', () => {
+  it('hides and returns from the navbar, remembers the choice and flags what is waiting', async () => {
+    const { OVERLAY_SCRIPT } = await import('../src/overlay.js');
+    expect(OVERLAY_SCRIPT).toContain('data-convo-hide');
+    expect(OVERLAY_SCRIPT).toContain('data-convo-show');
+    expect(OVERLAY_SCRIPT).toContain("const hidden = !!state.convoHidden && !bottom;");
+    expect(OVERLAY_SCRIPT).toContain("html.style.paddingRight = hidden ? '' : '400px';");
+    expect(OVERLAY_SCRIPT).toContain("sessionStorage.setItem(CONVO_KEY, on ? 'hidden' : 'shown')");
+    expect(OVERLAY_SCRIPT).toContain("' queued'");
+    expect(OVERLAY_SCRIPT).toContain("' new replies'");
+  });
+});
+
+describe('settings are discoverable from the help', () => {
+  it('kaya --help names every environment variable Kaya reads', async () => {
+    const { code, stdout } = await kaya(['--help']);
+    expect(code).toBe(0);
+    for (const name of ['KAYA_PORT', 'KAYA_STATE_DIR', 'KAYA_IDLE_TIMEOUT_MS', 'KAYA_DISCONNECT_GRACE_MS', 'KAYA_BROWSER']) expect(stdout).toContain(name);
+  });
+});

@@ -38,6 +38,7 @@ export const OVERLAY_SCRIPT = `
     + '<button class="kaya-overflowbtn" data-overflow style="display:none">0 layout issues</button>'
     + '<label class="kaya-toggle"><input type="checkbox" data-kaya-annotate-toggle><span class="kaya-switch"></span>Annotate</label>'
     + '<div class="kaya-reviewswrap" data-reviews-wrap style="display:none"><button class="kaya-reviewsbtn" data-reviews-btn>Reviews</button><div class="kaya-reviews" data-reviews></div></div>'
+    + '<button class="kaya-convobtn" data-convo-show style="display:none" title="Show the conversation">Conversation</button>'
     + '<div class="kaya-menuwrap"><button class="kaya-menubtn" data-menu-btn aria-label="Menu">\\u22ee</button>'
     + '<div class="kaya-menu" data-menu>'
     + '<div class="kaya-menu-file" data-menu-file>artifact</div>'
@@ -56,16 +57,21 @@ export const OVERLAY_SCRIPT = `
     + '<div class="kaya-pop-actions"><button class="kaya-pop-cancel" data-pop-cancel>Cancel</button><button class="kaya-pop-queue" data-kaya-queue data-pop-queue>Queue</button></div>';
 
   const convo = document.createElement('aside'); convo.id='kaya-convo';
-  convo.innerHTML = '<div class="kaya-convo-head"><span class="kaya-convo-title">Conversation</span><span class="kaya-presence" data-presence></span><span class="kaya-count" data-count>0</span></div>'
+  convo.innerHTML = '<div class="kaya-convo-head"><span class="kaya-convo-title">Conversation</span><span class="kaya-presence" data-presence></span><span class="kaya-count" data-count>0</span><button class="kaya-hidebtn" data-convo-hide title="Hide the conversation" aria-label="Hide the conversation">\\u00bb</button></div>'
     + '<div class="kaya-nolisten" data-nolisten>No agent is listening. Anything you send now waits in the queue until one polls - ask your agent to run <b>kaya poll</b>.</div>'
     + '<div class="kaya-log" data-log data-kaya-reply></div>'
     + '<div class="kaya-pending" data-pending></div>'
-    + '<div class="kaya-otherbanner" data-otherbanner>This review is open in another tab. <button data-takeover>Take over here</button></div>'
+    + '<div class="kaya-otherbanner" data-otherbanner><span data-otherbanner-text>This review is open in another tab.</span> <button data-takeover>Take over here</button></div>'
     + '<div class="kaya-composer"><textarea data-input placeholder="Write a message for the agent..."></textarea>'
+    + '<div class="kaya-sendhint" data-sendhint></div>'
     + '<div class="kaya-send-row"><button class="kaya-btn-primary" data-send>Send to Agent</button><button class="kaya-btn-ghost" data-end>Send &amp; End</button></div></div>';
 
   root.appendChild(nav); root.appendChild(hl); root.appendChild(pop); root.appendChild(convo);
   html.appendChild(root);
+  // Keys pressed in Kaya's own panel stop here. Left to bubble, they reached the
+  // artifact's document and window handlers, and a slide deck that cancels Space
+  // or a letter shortcut ate those keys out of the note being typed.
+  ['keydown','keypress','keyup'].forEach(function(type){ root.addEventListener(type, function(e){ e.stopPropagation(); }); });
 
   const q = function(sel,r){ return (r||convo).querySelector(sel); };
   const logEl = q('[data-log]'); const composerInput = q('[data-input]'); const pendingEl = q('[data-pending]'); const countEl = q('[data-count]');
@@ -75,14 +81,53 @@ export const OVERLAY_SCRIPT = `
   if(overflowBtn) overflowBtn.addEventListener('click', cycleOverflow);
   const popHead = pop.querySelector('[data-pop-head]'); const popInput = pop.querySelector('[data-pop-input]');
 
+  // On a wide screen the conversation can be folded away to give the artifact the
+  // full width. The choice is kept per review across reloads, and the navbar
+  // button that brings it back says what is waiting in it.
+  const CONVO_KEY='kaya:convo:' + '__KAYA_SESSION_KEY__';
+  // How many agent replies this tab has shown, kept with the choice: the artifact
+  // reloads whenever the agent edits it, and a reply that landed while the panel
+  // was folded must still read as new afterwards.
+  try{
+    state.convoHidden = sessionStorage.getItem(CONVO_KEY)==='hidden';
+    const seen=sessionStorage.getItem(CONVO_KEY+':seen'); if(seen!=null) state.seenReplies=Number(seen)||0;
+  }catch(_e){}
+  function markRepliesSeen(){
+    state.seenReplies=state.agentReplies||0; state.unseenReplies=0;
+    try{ sessionStorage.setItem(CONVO_KEY+':seen', String(state.seenReplies)); }catch(_e){}
+  }
+  const convoShowBtn = nav.querySelector('[data-convo-show]');
+  function syncConvoBtn(){
+    const hidden = convo.classList.contains('kaya-collapsed');
+    convoShowBtn.style.display = hidden ? 'inline-flex' : 'none';
+    if(!hidden) return;
+    const parts=['Conversation'];
+    if(state.queued.length) parts.push(state.queued.length+' queued');
+    if(state.unseenReplies) parts.push(state.unseenReplies===1 ? '1 new reply' : state.unseenReplies+' new replies');
+    convoShowBtn.textContent=parts.join(' \\u00b7 ');
+    convoShowBtn.classList.toggle('kaya-new', !!state.unseenReplies);
+  }
   function layout(){
     const bottom = window.innerWidth < 980;
+    const hidden = !!state.convoHidden && !bottom;   // a narrow screen keeps its bottom dock
     convo.classList.toggle('kaya-dock-bottom', bottom);
     convo.classList.toggle('kaya-dock-right', !bottom);
+    convo.classList.toggle('kaya-collapsed', hidden);
     html.style.paddingTop = '52px';
     if(bottom){ html.style.paddingRight=''; html.style.paddingBottom='44vh'; }
-    else { html.style.paddingBottom=''; html.style.paddingRight='400px'; }
+    else { html.style.paddingBottom=''; html.style.paddingRight = hidden ? '' : '400px'; }
+    syncConvoBtn();
   }
+  function setConvoHidden(on){
+    state.convoHidden=on;
+    if(!on) markRepliesSeen();
+    try{ sessionStorage.setItem(CONVO_KEY, on ? 'hidden' : 'shown'); }catch(_e){}
+    // The artifact just changed width: let its own layout code and Kaya's
+    // overflow check see that, as they would for a window resize.
+    window.dispatchEvent(new Event('resize'));
+  }
+  convo.querySelector('[data-convo-hide]').addEventListener('click', function(){ setConvoHidden(true); });
+  convoShowBtn.addEventListener('click', function(){ setConvoHidden(false); });
   layout(); window.addEventListener('resize', layout);
 
   function isOurs(el){ return !el || root.contains(el); }
@@ -333,6 +378,7 @@ export const OVERLAY_SCRIPT = `
     saveStage();
     countEl.textContent=String(state.queued.length);
     countEl.classList.toggle('kaya-on', state.queued.length>0);
+    syncConvoBtn();
     pendingEl.innerHTML=state.queued.map(function(it,i){
       const st = it.anchorState||'ok';
       const badge = st==='stale' ? '<span class="kaya-pi-badge kaya-stale">anchor lost</span>'
@@ -462,6 +508,18 @@ export const OVERLAY_SCRIPT = `
   }
   async function send(endAfter){
     const msg=composerInput.value.trim();
+    // Notes typed in another tab stay in that tab and are sent only from there.
+    // Ending from here would strand them, so Send & End holds off and says why;
+    // nothing is sent and nothing ends. An empty Send says where the notes are.
+    const elsewhere=state.elsewhere||0;
+    if(elsewhere && (endAfter || (!msg && !state.queued.length))){
+      const notes = elsewhere===1 ? '1 unsent note' : elsewhere+' unsent notes', them = elsewhere===1 ? 'it' : 'them';
+      showSendHint(endAfter
+        ? 'Not ended: your other tab on this review still holds '+notes+', and ending now would strand '+them+'. Send '+them+' from that tab first, or choose End session in the \\u22ee menu to end anyway.'
+        : 'Nothing to send from this tab. Your other tab on this review holds '+notes+': send '+them+' from there.');
+      return false;
+    }
+    hideSendHint();
     if(msg){ state.queued.push({ ref:null, note:msg, display:msg, agentText:msg, attachments:state.pendingAttachments.splice(0) }); composerInput.value=''; renderPending(); }
     if(!state.queued.length && !endAfter) return true;
     sendBtn.disabled=true; endBtn.disabled=true;
@@ -517,6 +575,12 @@ export const OVERLAY_SCRIPT = `
     wireAttach(composerInput, show);
     state.showAttachCount=show;
   })();
+  const sendHintEl=q('[data-sendhint]');
+  function showSendHint(text){ sendHintEl.textContent=text; sendHintEl.classList.add('kaya-show'); }
+  function hideSendHint(){ sendHintEl.classList.remove('kaya-show'); }
+  // Sign off when this tab goes away, so a reload is never counted as a second
+  // tab still holding the notes the reload has just restored here.
+  window.addEventListener('pagehide', function(){ try{ fetch(base+'/state?client='+clientId+'&leaving=1',{keepalive:true}); }catch(_e){} });
   // Last-resort guard: warn before leaving with unsent notes still staged.
   window.addEventListener('beforeunload', function(e){
     if(!state.queued.length || state.leaving) return;
@@ -580,7 +644,21 @@ export const OVERLAY_SCRIPT = `
 
   // ---- multi-tab awareness ----
   const bannerEl = q('[data-otherbanner]');
-  bannerEl.querySelector('[data-takeover]').addEventListener('click', function(){ fetch(base+'/claim?client='+clientId,{method:'POST'}).catch(function(){}); bannerEl.classList.remove('kaya-show'); });
+  const bannerTextEl = bannerEl.querySelector('[data-otherbanner-text]');
+  const takeoverBtn = bannerEl.querySelector('[data-takeover]');
+  // Shown when another tab is the main one, and whenever another tab holds
+  // unsent notes: taking over does not move them, they are sent from that tab.
+  function renderOtherTabs(d){
+    const behind = (d.clients||1) > 1 && !!d.primary && d.primary!==clientId;
+    const n = state.elsewhere;
+    bannerTextEl.textContent = n
+      ? 'Your other tab on this review holds '+(n===1 ? '1 unsent note. It stays in that tab: send it from there.' : n+' unsent notes. They stay in that tab: send them from there.')
+      : 'This review is open in another tab.';
+    takeoverBtn.style.display = behind ? '' : 'none';
+    bannerEl.classList.toggle('kaya-show', behind || n>0);
+    if(!n) hideSendHint();
+  }
+  takeoverBtn.addEventListener('click', function(){ fetch(base+'/claim?client='+clientId,{method:'POST'}).catch(function(){}); bannerEl.classList.remove('kaya-show'); });
 
   // ---- declarative asks ----
   // The agent DECLARES a question in the artifact markup; the overlay renders the
@@ -820,7 +898,12 @@ export const OVERLAY_SCRIPT = `
       renderHistory(d.history||[], d.presence);
       renderPresence(d.presence);
       state.ended=Boolean(d.ended); applyEnded();
-      bannerEl.classList.toggle('kaya-show', (d.clients||1) > 1 && !!d.primary && d.primary!==clientId);
+      state.elsewhere = d.stagedElsewhere||0;
+      renderOtherTabs(d);
+      state.agentReplies = (d.history||[]).filter(function(m){ return m.role==='agent'; }).length;
+      if(state.seenReplies==null || !convo.classList.contains('kaya-collapsed')) markRepliesSeen();
+      state.unseenReplies = Math.max(0, state.agentReplies-state.seenReplies);
+      syncConvoBtn();
       // The agent rewrote the artifact on disk -> reload so the body reflects it
       // (the conversation persists on the server). Only when nothing is staged,
       // so we never drop unsent annotations; otherwise reload after the next send.
@@ -855,10 +938,65 @@ export function overlayMarkup(sessionKey, base = KAYA_PREFIX) {
   return `<style id="kaya-overlay-style">${OVERLAY_STYLE}</style><script id="kaya-overlay-script">${script}</script>`;
 }
 
+// Where a browser would see the end tag </name>: the first one outside comments,
+// <template> content and raw-text elements (script, style, textarea, title...).
+// A plain regex took the first "</body>" anywhere, so an artifact script that
+// only mentioned it, say in a template string, got Kaya's overlay pasted into
+// its source: the artifact's script broke and the overlay never loaded.
+const RAW_TEXT = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript']);
+// Index just past the ">" that closes a start tag; a quoted value may hold ">".
+function tagEnd(html, from) {
+  let quote = '', afterEq = false;
+  for (let i = from; i < html.length; i++) {
+    const c = html[i];
+    if (quote) { if (c === quote) quote = ''; continue; }
+    if (c === '>') return i + 1;
+    if (afterEq && (c === '"' || c === "'")) { quote = c; afterEq = false; continue; }
+    if (c === '=') afterEq = true; else if (!/\s/.test(c)) afterEq = false;
+  }
+  return -1;
+}
+export function endTagIndex(html, name) {
+  const tags = /<!--|<(\/?)([a-zA-Z][a-zA-Z0-9-]*)(?=[\s/>])/g;
+  let template = 0; let m;
+  while ((m = tags.exec(html))) {
+    if (m[0] === '<!--') {
+      const empty = /^<!---?>/.exec(html.slice(m.index, m.index + 6));   // <!--> and <!---> close at once
+      if (empty) { tags.lastIndex = m.index + empty[0].length; continue; }
+      const close = /--!?>/g;
+      close.lastIndex = m.index + 4;
+      if (!close.exec(html)) return -1;
+      tags.lastIndex = close.lastIndex;
+      continue;
+    }
+    const tag = m[2].toLowerCase();
+    if (m[1]) {
+      if (tag === 'template' && template) template--;
+      else if (tag === name && !template) return m.index;
+      continue;
+    }
+    const end = tagEnd(html, tags.lastIndex);
+    if (end === -1) return -1;
+    tags.lastIndex = end;
+    if (tag === 'template') template++;
+    else if (RAW_TEXT.has(tag)) {
+      const close = new RegExp(`</${tag}(?=[\\s/>])`, 'ig');
+      close.lastIndex = tags.lastIndex;
+      if (!close.exec(html)) return -1;
+      tags.lastIndex = close.lastIndex;
+    }
+  }
+  return -1;
+}
+
+// Put markup just before the real </body>, or at the end when there is none.
+export function insertBeforeBodyEnd(html, markup) {
+  const at = endTagIndex(html, 'body');
+  return at === -1 ? `${html}\n${markup}` : html.slice(0, at) + markup + html.slice(at);
+}
+
 export function injectOverlay(html, sessionKey, base) {
-  const marker = overlayMarkup(sessionKey, base);
-  if (/<\/body>/i.test(html)) return html.replace(/<\/body>/i, `${marker}</body>`);
-  return `${html}\n${marker}`;
+  return insertBeforeBodyEnd(html, overlayMarkup(sessionKey, base));
 }
 
 // Default the review canvas to dark. Injected early (top of <head>) so an

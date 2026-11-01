@@ -1,3 +1,5 @@
+import { endTagIndex } from './overlay.js';
+
 // KAYA review-surface favicon: a kaya (coconut-jam) pot, the brand mark.
 // Inlined as a base64 data-URI so it needs no binary asset in the repo and
 // survives the offline export untouched. Regenerate from kaya-favicon.png with
@@ -9,7 +11,8 @@ export const KAYA_FAVICON = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAA
 // document when there is no <head> at all.
 export function injectFavicon(html) {
   const link = '<link rel="icon" type="image/png" href="' + KAYA_FAVICON + '">';
-  if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, link + '</head>');
+  const end = endTagIndex(html, 'head');
+  if (end !== -1) return html.slice(0, end) + link + html.slice(end);
   if (/<head[^>]*>/i.test(html)) return html.replace(/<head([^>]*)>/i, '<head$1>' + link);
   return link + html;
 }

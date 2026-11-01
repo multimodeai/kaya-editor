@@ -451,10 +451,20 @@ export class ReviewSession {
         const n = Number(url.searchParams.get('staged'));
         this.staged.set(cid, { n: Number.isFinite(n) && n > 0 ? n : 0, at: now });
       }
+      // A tab that is closing or reloading signs off at once. Otherwise it lingers
+      // for CLIENT_STALE_MS as "another tab", still holding the notes it carried,
+      // which a reload has just restored under a new client id. The disconnect
+      // grace still runs from lastClientAt, set above, so a reload stays a reload.
+      if (cid && url.searchParams.get('leaving')) this.clients.delete(cid);
       for (const id of this.staged.keys()) if (!this.clients.has(id)) this.staged.delete(id);
       for (const [id, t] of this.clients) if (now - t > CLIENT_STALE_MS) this.clients.delete(id);
       if (!this.primary || !this.clients.has(this.primary)) this.primary = this.clients.keys().next().value || null;
-      return json(response, 200, { agentReply: this.agentReply, ended: this.ended, queued: this.queue.length, clients: this.clients.size, primary: this.primary, history: this.history, fileMtime: this.fileMtime(), staged: this.stagedCount(), endedBy: this.endedBy, presence: this.presence() });
+      // Unsent notes held by the reviewer's OTHER tabs. They are only ever sent
+      // from the tab that holds them, so this tab warns before Send & End would
+      // strand them.
+      let stagedElsewhere = 0;
+      for (const [id, v] of this.staged) if (id !== cid) stagedElsewhere += (v && v.n) || 0;
+      return json(response, 200, { agentReply: this.agentReply, ended: this.ended, queued: this.queue.length, clients: this.clients.size, primary: this.primary, history: this.history, fileMtime: this.fileMtime(), staged: this.stagedCount(), stagedElsewhere, endedBy: this.endedBy, presence: this.presence() });
     }
     if (url.pathname === '/__kaya/claim' && request.method === 'POST') {
       const cid = url.searchParams.get('client');

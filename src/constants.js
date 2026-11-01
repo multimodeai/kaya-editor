@@ -122,6 +122,15 @@ html.kaya-annotate { cursor:crosshair; }
 #kaya-convo .kaya-msg .kaya-who .kaya-round { margin-left:7px; padding:1px 7px; border-radius:999px; background:rgba(199,91,63,.18); color:var(--kt2); font-size:9px; letter-spacing:.06em; }
 #kaya-convo .kaya-otherbanner { display:none; align-items:center; justify-content:space-between; gap:10px; margin:0 14px 10px; padding:9px 12px; border:1px solid rgba(224,176,98,.4); border-radius:9px; background:rgba(224,176,98,.1); color:#e0b062; font-size:12px; line-height:1.35; }
 #kaya-convo .kaya-otherbanner.kaya-show { display:flex; }
+#kaya-convo .kaya-sendhint { display:none; margin-top:10px; padding:9px 12px; border:1px solid rgba(224,176,98,.4); border-radius:9px; background:rgba(224,176,98,.1); color:#e0b062; font-size:12px; line-height:1.45; }
+#kaya-convo .kaya-sendhint.kaya-show { display:block; }
+#kaya-convo.kaya-collapsed { display:none; }
+#kaya-convo .kaya-hidebtn { display:inline-flex; align-items:center; justify-content:center; width:26px; height:26px; margin-right:-6px; border:0; border-radius:7px; background:transparent; color:var(--muted); font-size:17px; line-height:1; cursor:pointer; }
+#kaya-convo .kaya-hidebtn:hover { background:rgba(255,255,255,.06); color:var(--ink); }
+#kaya-convo.kaya-dock-bottom .kaya-hidebtn { display:none; }
+#kaya-nav .kaya-convobtn { display:inline-flex; align-items:center; height:34px; padding:0 12px; border:1px solid var(--line); border-radius:9px; background:transparent; color:var(--muted); font-size:12.5px; font-weight:600; cursor:pointer; white-space:nowrap; }
+#kaya-nav .kaya-convobtn:hover { background:rgba(255,255,255,.06); color:var(--ink); }
+#kaya-nav .kaya-convobtn.kaya-new { border-color:var(--kt); color:var(--kt2); }
 #kaya-convo .kaya-otherbanner button { border:0; background:transparent; color:#e0b062; font-size:12px; font-weight:700; cursor:pointer; white-space:nowrap; text-decoration:underline; padding:0; }
 
 #kaya-overlay .kaya-ask,.kaya-ask{margin:14px 0;padding:14px 16px;border:1px solid rgba(199,91,63,.35);border-radius:10px;background:rgba(199,91,63,.06)}

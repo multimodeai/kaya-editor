@@ -17,10 +17,10 @@ Items marked `open` below are the ones the agent left for a human decision.
 The check script reads and rewrites this block. Keep the format.
 
 ```upstream
-lavish-axi: 0.1.90
+lavish-axi: 0.1.96
 axi-sdk-js: 0.1.13
-axi-spec: 0374ba4118d4
-reviewed: 2026-10-22
+axi-spec: 4184081afe3a
+reviewed: 2026-11-01
 ```
 
 | Source | What it is | Where the check reads it |
@@ -63,6 +63,16 @@ Declined items stay declined. They are recorded so the same question is not re-a
 | Adopt a running server newer than the CLI | lavish-axi 0.1.87 | already had | Kaya never replaces a newer running server with an older one, since 0.3.0 |
 | Ignore the Enter that confirms an IME conversion | lavish-axi 0.1.89 | adopted | Reproduced on Kaya: Enter confirming a Chinese/Japanese word queued a half-typed note |
 | Cmd-click follows links on macOS only, Ctrl-click elsewhere | lavish-axi 0.1.88 | adopted | On a Mac Ctrl-click is right-click; on Windows/Linux only Ctrl should follow |
+| Inject at the body end tag a parser would see | lavish-axi 0.1.96 | adopted | Reproduced on Kaya: an artifact script mentioning `</body>` got the overlay pasted into its string, breaking both. Same fix for the Mermaid runtime and the favicon's `</head>` |
+| Artifact key handlers cancelled annotation typing | lavish-axi 0.1.93 | adopted | Reproduced on Kaya: a slide deck that cancels Space and letters turned "make it look better" into "maeitloobetter" and flipped slides. Keys stop at Kaya's panel now |
+| Warn that unsent notes stay in their own tab | lavish-axi 0.1.95 | adapted | Reproduced on Kaya: an empty Send & End in a second tab ended the review and stranded the first tab's notes. The banner says where they are, an empty Send says so, and Send & End holds off. A closing tab now signs off at once so a reload is not counted as a second tab |
+| Name End session in the empty Send & End hint | lavish-axi 0.1.91 | adapted | Kaya had no such hint; its new "other tab holds notes" hint names End session as the way to end anyway |
+| Collapsible conversation sidebar on desktop | lavish-axi 0.1.94 | adopted | Gives the artifact the full width; the navbar button that brings it back shows queued notes and new replies. Remembered per tab; the narrow-screen bottom dock is unchanged |
+| Artifact updates the tab title and icon live | lavish-axi 0.1.94 | already had | The artifact is the page itself, so `document.title` already names the tab. The icon stays Kaya's on purpose |
+| Name the allowed-hosts setting in the home help | lavish-axi 0.1.91 | adapted | Kaya has no allowed-hosts setting (loopback only, by design); `kaya --help` now names the settings Kaya does read. Not in bare `kaya`, which every session start prints and is kept small |
+| Navigate the artifact frame from one place | lavish-axi 0.1.93 | declined | Not applicable: Kaya serves the artifact as the page, there is no frame |
+| Skip unresolved Tailscale binaries | lavish-axi 0.1.96 | declined | Kaya is local-only and never probes Tailscale |
+| Design reference: Lavish modifies served files | lavish-axi 0.1.92 | declined | Playbook content, declined with playbooks; Kaya's README already says it injects an overlay |
 | Excalidraw libraries in the whiteboard | lavish-axi 0.1.85 | declined | Whiteboard itself is declined |
 | Fatal render detection (`artifact_failures`) | lavish-axi | open | Not yet reviewed in depth |
 | Per-harness guidance | lavish-axi | open | Lavish special-cases Codex; not yet needed |

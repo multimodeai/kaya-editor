@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
+import { insertBeforeBodyEnd } from './overlay.js';
 
 const VERSION = '11.15.0';
 const here = dirname(fileURLToPath(import.meta.url));
@@ -136,7 +137,7 @@ export function injectMermaidRuntime(html) {
   // two runtimes racing on the same .mermaid nodes leaves the diagram blank.
   if (/import\s+mermaid|mermaid@\d|mermaid\.(initialize|run)\s*\(/i.test(html)) return html;
   const markup = mermaidRuntimeMarkup();
-  return /<\/body>/i.test(html) ? html.replace(/<\/body>/i, `${markup}</body>`) : `${html}\n${markup}`;
+  return insertBeforeBodyEnd(html, markup);
 }
 
 export async function renderMermaidSource(source) {

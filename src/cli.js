@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   AxiError, compareSemver, installSessionStartHooks, runAxiCli, sessionStartHookStatus, uninstallSessionStartHooks,
 } from 'axi-sdk-js';
+import { DEFAULT_PORT } from './constants.js';
 import { exportHtml } from './export.js';
 import { KayaDaemon, isReviewableFile, startKayaServer } from './server.js';
 import { listRegistries, readDaemon, readRegistry, urlKeyFor } from './registry.js';
@@ -588,7 +589,15 @@ writing the artifact:
   Mermaid in a .mermaid or fenced block renders automatically, read-only.
   <div data-kaya-ask="id" data-kaya-label="Question?" data-kaya-options="a|b|c">
   renders one-click choices whose answers come back typed, as [ask] id = value.
-  Assets sit beside the artifact and are referenced relatively, never with a leading /.`;
+  Assets sit beside the artifact and are referenced relatively, never with a leading /.
+
+environment:
+  KAYA_PORT                 Port of the shared review server (default ${DEFAULT_PORT})
+  KAYA_STATE_DIR            Where reviews, conversations and attachments are kept
+  KAYA_IDLE_TIMEOUT_MS      Idle time before the server stops itself (default 30 minutes)
+  KAYA_DISCONNECT_GRACE_MS  How long a closed review tab may come back before a poll
+                            reports it disconnected (default 15000)
+  KAYA_BROWSER              Chrome or Chromium that pre-renders Mermaid for export`;
 
 const COMMAND_HELP = {
   open: `usage: kaya open <file> [--reopen] [--no-open]
