@@ -1,6 +1,6 @@
 {
   "name": "kaya-editor",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Local browser review surface for agent-written artifacts. Annotate, send feedback, no upload.",
   "type": "module",
   "bin": {
@@ -40,6 +40,6 @@
   },
   "dependencies": {
     "@toon-format/toon": "^2.3.1",
-    "axi-sdk-js": "^0.1.13"
+    "axi-sdk-js": "^0.1.14"
   }
 }

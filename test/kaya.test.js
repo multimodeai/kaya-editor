@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { exportHtml, inlineAssets } from '../src/export.js';
@@ -1118,5 +1118,45 @@ describe('settings are discoverable from the help', () => {
     const { code, stdout } = await kaya(['--help']);
     expect(code).toBe(0);
     for (const name of ['KAYA_PORT', 'KAYA_STATE_DIR', 'KAYA_IDLE_TIMEOUT_MS', 'KAYA_DISCONNECT_GRACE_MS', 'KAYA_BROWSER']) expect(stdout).toContain(name);
+  });
+});
+
+describe('kaya setup hooks repairs stale entries instead of stacking them', () => {
+  // The SDK only installs from a packaged entrypoint, which it recognises by
+  // the binary name, so the binary runs the way a global install runs it:
+  // through a `kaya` symlink. HOME is a throwaway, the real settings are never touched.
+  function seededHome() {
+    const home = mkdtempSync(join(tmpdir(), 'kaya-home-'));
+    tempDirs.push(home);
+    const group = (command) => ({ matcher: '', hooks: [{ type: 'command', command, timeout: 10 }] });
+    // Two old kaya entries from installs at different paths, with someone else's hook between them.
+    const stale = JSON.stringify({ hooks: { SessionStart: [group('/old/path/kaya'), group('gh-axi'), group('/other/path/kaya')] } }, null, 2);
+    for (const [dir, file] of [['.claude', 'settings.json'], ['.codex', 'hooks.json']]) {
+      mkdirSync(join(home, dir));
+      writeFileSync(join(home, dir, file), stale);
+    }
+    mkdirSync(join(home, 'bin'));
+    symlinkSync(new URL('../bin/kaya.js', import.meta.url).pathname, join(home, 'bin', 'kaya'));
+    return home;
+  }
+  function setupHooks(home) {
+    return new Promise((resolveRun) => {
+      execFile(process.execPath, [join(home, 'bin', 'kaya'), 'setup', 'hooks'],
+        { env: { ...process.env, HOME: home, PATH: `${join(home, 'bin')}:${process.env.PATH}`, NO_COLOR: '1' } },
+        (error, stdout, stderr) => resolveRun({ code: error ? error.code : 0, stdout, stderr }));
+    });
+  }
+
+  it('leaves exactly one kaya hook per agent and keeps unrelated hooks', async () => {
+    const home = seededHome();
+    const { code, stdout } = await setupHooks(home);
+    expect(code).toBe(0);
+    expect(stdout).toContain('session hooks installed');
+    for (const file of [join(home, '.claude', 'settings.json'), join(home, '.codex', 'hooks.json')]) {
+      const commands = JSON.parse(readFileSync(file, 'utf8')).hooks.SessionStart.flatMap((g) => g.hooks.map((h) => h.command));
+      // axi-sdk-js 0.1.13 repaired the first entry and left the second, so every new session ran Kaya twice
+      expect(commands.filter((c) => c.includes('kaya'))).toEqual(['kaya']);
+      expect(commands).toContain('gh-axi');
+    }
   });
 });
