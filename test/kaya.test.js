@@ -609,6 +609,20 @@ describe('visual review: overflow, zoom, svg annotation', () => {
     expect(check).not.toContain('addQueued');
   });
 
+  it('regression: the layout-issue marker lands where the target settles after a smooth scroll', async () => {
+    // Reproduced on Kaya 0.4.3: on a long page the smooth scroll took about 1.5s,
+    // the marker was placed on a 320ms timer, and it was left ~9,600px from the
+    // element it was pointing at.
+    const { OVERLAY_SCRIPT } = await import('../src/overlay.js');
+    const cycle = OVERLAY_SCRIPT.slice(OVERLAY_SCRIPT.indexOf('function cycleOverflow'), OVERLAY_SCRIPT.indexOf('function reduceMotion'));
+    expect(cycle).not.toMatch(/setTimeout\(function\(\)\{ placeHl/);
+    expect(cycle).toContain('revealMarker(el);');
+    expect(cycle).toContain('requestAnimationFrame(frame)');
+    expect(cycle).toContain('if(at!==last){ last=at; stillSince=now; }');    // follows until the target holds still
+    expect(cycle).toContain('if(run!==revealRun) return;');                 // a newer jump replaces an older one
+    expect(new Function(OVERLAY_SCRIPT)).toBeTruthy();
+  });
+
   it('AC5: SVG selectors preserve tag case and use classList, never className', async () => {
     const { OVERLAY_SCRIPT } = await import('../src/overlay.js');
     expect(OVERLAY_SCRIPT).toContain('isSvg(cur) ? cur.tagName : cur.tagName.toLowerCase()');
@@ -642,6 +656,22 @@ describe('selector uniqueness', () => {
     // the check bail on selectors that were unique within the artifact
     // (found by browser probe, 2026-08-22).
     expect(OVERLAY_SCRIPT).toMatch(/countIn[\s\S]{0,200}!isOurs\(n\)/);
+    expect(new Function(OVERLAY_SCRIPT)).toBeTruthy();
+  });
+
+  it('regression: deep look-alike elements and shared ids still get a selector of their own', async () => {
+    // Reproduced on Kaya 0.4.3: two cards nested seven deep both came out as
+    // "div > div > div > div > p", and two elements with id="dup" both as "#dup",
+    // so a click on the second reopened the first one's queued note for editing.
+    const { OVERLAY_SCRIPT } = await import('../src/overlay.js');
+    const sel = OVERLAY_SCRIPT.slice(OVERLAY_SCRIPT.indexOf('function selectorFor'), OVERLAY_SCRIPT.indexOf('function svgTarget'));
+    expect(sel).not.toContain("return '#'+CSS.escape(element.id)");          // an id is used only when it is unique
+    expect(sel).toContain("if(countIn(byId)===1) return byId;");
+    expect(sel).toContain("if(countIn(byId)===1){ chain.unshift(byId); break; }");
+    expect(sel).not.toContain('chain.length<6');                             // no depth cap that gives up early
+    expect(sel).toContain("if(countIn(chain.join(' > '))===1) break;");       // shortest unique form wins
+    expect(sel).toContain("if(node===document.body) chain.unshift('body');"); // the full path is always unique
+    expect(sel.indexOf('const countIn')).toBeLessThan(sel.indexOf('if(element.id)'));
     expect(new Function(OVERLAY_SCRIPT)).toBeTruthy();
   });
 });

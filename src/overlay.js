@@ -154,9 +154,17 @@ export const OVERLAY_SCRIPT = `
   function isSvg(el){ return !!(el && el.ownerSVGElement !== undefined && el.namespaceURI==='http://www.w3.org/2000/svg'); }
   function selectorFor(element){
     if(!element || element===document.body || element===html) return 'body';
+    // Count matches in the ARTIFACT only. Kaya's own chrome is full of generic
+    // divs, and counting those made the uniqueness check bail on selectors that
+    // were in fact unique within the document being reviewed.
+    const countIn = function(q){
+      try{ return Array.prototype.filter.call(document.querySelectorAll(q), function(n){ return !isOurs(n); }).length; }
+      catch(_e){ return -1; }
+    };
     // An id inside a diagram is the most stable anchor available (Mermaid emits
-    // e.g. flowchart-Decision-3), so short-circuit on it.
-    if(element.id){ try{ return '#'+CSS.escape(element.id); }catch(_e){} }
+    // e.g. flowchart-Decision-3), so short-circuit on it - unless the artifact
+    // repeats the id, when it names more than one element.
+    if(element.id){ try{ const byId='#'+CSS.escape(element.id); if(countIn(byId)===1) return byId; }catch(_e){} }
     const parts=[]; let cur=element;
     while(cur && cur.nodeType===1 && cur!==document.body && parts.length<5){
       // SVG tagName preserves case (linearGradient, clipPath) - lowercasing it
@@ -168,24 +176,19 @@ export const OVERLAY_SCRIPT = `
       parts.unshift(part); cur=cur.parentElement;
     }
     let sel = parts.join(' > ')||'body';
-    // Count matches in the ARTIFACT only. Kaya's own chrome is full of generic
-    // divs, and counting those made the uniqueness check bail on selectors that
-    // were in fact unique within the document being reviewed.
-    const countIn = function(q){
-      try{ return Array.prototype.filter.call(document.querySelectorAll(q), function(n){ return !isOurs(n); }).length; }
-      catch(_e){ return -1; }
-    };
     // A selector that matches more than one element is worse than useless: the
-    // agent cannot tell which element was meant, and anchor validation resolves
-    // the wrong node and reports a fresh note as stale. Disambiguate with
-    // nth-of-type, walking outward until the selector resolves uniquely.
+    // agent cannot tell which element was meant, anchor validation resolves the
+    // wrong node and reports a fresh note as stale, and a click on the second
+    // element reopens the first one's queued note. Disambiguate with
+    // nth-of-type, walking outward until the selector resolves uniquely; if no
+    // shorter form does, the full path from <body> always will.
     try{
       if(countIn(sel) !== 1){
         const chain=[]; let node=element;
-        while(node && node.nodeType===1 && node!==document.body && chain.length<6){
+        while(node && node.nodeType===1 && node!==document.body){
           const tag = isSvg(node) ? node.tagName : node.tagName.toLowerCase();
           let piece = tag;
-          if(node.id){ chain.unshift('#'+CSS.escape(node.id)); break; }
+          if(node.id){ const byId='#'+CSS.escape(node.id); if(countIn(byId)===1){ chain.unshift(byId); break; } }
           const parent=node.parentElement;
           if(parent){
             const sibs=Array.from(parent.children).filter(function(c){
@@ -194,8 +197,10 @@ export const OVERLAY_SCRIPT = `
             if(sibs.length>1) piece += ':nth-of-type('+(sibs.indexOf(node)+1)+')';
           }
           chain.unshift(piece);
+          if(countIn(chain.join(' > '))===1) break;
           node=parent;
         }
+        if(node===document.body) chain.unshift('body');
         const exact=chain.join(' > ');
         if(exact && countIn(exact)===1) sel=exact;
       }
@@ -760,8 +765,25 @@ export const OVERLAY_SCRIPT = `
     if(!overflowHits.length) return;
     const el=overflowHits[overflowIdx % overflowHits.length]; overflowIdx++;
     el.scrollIntoView({ block:'center', behavior: reduceMotion()?'auto':'smooth' });
-    placeHl(el.getBoundingClientRect(), true);
-    setTimeout(function(){ placeHl(el.getBoundingClientRect(), true); }, 320);
+    revealMarker(el);
+  }
+  // A smooth scroll down a long page can run well past a second, so a marker
+  // placed on a timer was left where the target sat mid-scroll. Follow the
+  // target each frame until it has held still, so the marker ends on where it
+  // settled. A hover or click that takes the marker over ends the follow.
+  let revealRun=0;
+  function revealMarker(el){
+    const run=++revealRun, start=performance.now();
+    let last='', stillSince=start, mine='';
+    (function frame(){
+      if(run!==revealRun) return;
+      if(mine && (hl.style.display==='none' || hl.style.left+','+hl.style.top!==mine)) return;
+      const r=el.getBoundingClientRect(), now=performance.now();
+      const at=r.left+','+r.top+','+r.width+','+r.height;
+      if(at!==last){ last=at; stillSince=now; }
+      placeHl(r, true); mine=hl.style.left+','+hl.style.top;
+      if(now-stillSince<200 && now-start<4000) requestAnimationFrame(frame);
+    })();
   }
   function reduceMotion(){ try{ return matchMedia('(prefers-reduced-motion: reduce)').matches; }catch(_e){ return false; } }
 
