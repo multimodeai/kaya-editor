@@ -1234,7 +1234,8 @@ describe('flow diagrams follow lavish-axi 0.1.98', () => {
     for (const rule of [
       'diagrams (flows, architecture, state, concepts):', 'hand-authored inline <svg>, not Mermaid',
       'Use Mermaid only when', 'follows the light or dark background',
-      "an export uses Mermaid's default light theme for an HTML artifact", 'its dark theme for a Markdown file',
+      "An exported HTML artifact embeds it in Mermaid's default light theme",
+      "a Markdown file exported with the review page's Export standalone HTML embeds it", "in Mermaid's dark theme.",
       'viewBox and width:100%',
       'currentColor', 'stable id and a <title>', 'Do not build boxes and arrows from divs',
       'light, dark and at phone width',
