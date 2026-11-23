@@ -985,9 +985,18 @@ function tagEnd(html, from) {
   }
   return -1;
 }
-export function endTagIndex(html, name) {
+export function endTagIndex(html, name) { return tagIndex(html, name, false); }
+
+// Where a browser would see the start tag <name>, by the same rules. Inside
+// <svg> and <math> a <title> names the drawing, not the page, so those are
+// skipped too: a tab whose only <title> was in a comment or an inline diagram
+// showed the bare address, since Kaya believed the page had named itself.
+export function startTagIndex(html, name) { return tagIndex(html, name, true); }
+
+const FOREIGN = new Set(['svg', 'math']);
+function tagIndex(html, name, opening) {
   const tags = /<!--|<(\/?)([a-zA-Z][a-zA-Z0-9-]*)(?=[\s/>])/g;
-  let template = 0; let m;
+  let template = 0, foreign = 0; let m;
   while ((m = tags.exec(html))) {
     if (m[0] === '<!--') {
       const empty = /^<!---?>/.exec(html.slice(m.index, m.index + 6));   // <!--> and <!---> close at once
@@ -1001,13 +1010,16 @@ export function endTagIndex(html, name) {
     const tag = m[2].toLowerCase();
     if (m[1]) {
       if (tag === 'template' && template) template--;
-      else if (tag === name && !template) return m.index;
+      else if (opening && FOREIGN.has(tag) && foreign) foreign--;
+      else if (!opening && tag === name && !template) return m.index;
       continue;
     }
+    if (opening && tag === name && !template && !foreign) return m.index;
     const end = tagEnd(html, tags.lastIndex);
     if (end === -1) return -1;
     tags.lastIndex = end;
     if (tag === 'template') template++;
+    else if (opening && FOREIGN.has(tag)) { if (html[end - 2] !== '/') foreign++; }
     else if (RAW_TEXT.has(tag)) {
       const close = new RegExp(`</${tag}(?=[\\s/>])`, 'ig');
       close.lastIndex = tags.lastIndex;
@@ -1033,18 +1045,23 @@ export function injectOverlay(html, sessionKey, base) {
 // background unset fall through to this dark default.
 export function injectBaseTheme(html) {
   const style = '<style id="kaya-base">html{background:#0b0b0b;color-scheme:dark}body{background-color:#0f0f0f;color:#e8e8e8}</style>';
-  if (/<head[^>]*>/i.test(html)) return html.replace(/<head([^>]*)>/i, `<head$1>${style}`);
-  if (/<html[^>]*>/i.test(html)) return html.replace(/<html([^>]*)>/i, `<html$1>${style}`);
-  return `${style}${html}`;
+  return insertAfterStartTag(html, 'head', style) ?? insertAfterStartTag(html, 'html', style) ?? `${style}${html}`;
+}
+
+// Put markup just after the real start tag <name>, or null when there is none.
+// A regex took the first "<head" anywhere, so a comment mentioning <head> got
+// Kaya's markup and hid it.
+function insertAfterStartTag(html, name, markup) {
+  const at = startTagIndex(html, name);
+  const end = at === -1 ? -1 : tagEnd(html, at + name.length + 1);
+  return end === -1 ? null : html.slice(0, end) + markup + html.slice(end);
 }
 
 // Give the browser tab a meaningful name (the file being reviewed) so multiple
 // open sessions are easy to tell apart, instead of "127.0.0.1". Only fills in a
 // title when the artifact does not already declare its own.
 export function injectTitle(html, name) {
-  if (/<title[^>]*>[\s\S]*?<\/title>/i.test(html)) return html;
+  if (startTagIndex(html, 'title') !== -1) return html;
   const tag = `<title>${String(name || 'Kaya review').replace(/[<>&]/g, '')}</title>`;
-  if (/<head[^>]*>/i.test(html)) return html.replace(/<head([^>]*)>/i, `<head$1>${tag}`);
-  if (/<html[^>]*>/i.test(html)) return html.replace(/<html([^>]*)>/i, `<html$1><head>${tag}</head>`);
-  return `<head>${tag}</head>${html}`;
+  return insertAfterStartTag(html, 'head', tag) ?? insertAfterStartTag(html, 'html', `<head>${tag}</head>`) ?? `<head>${tag}</head>${html}`;
 }
