@@ -61,6 +61,10 @@ rewritten, so tooling that parses your raw Markdown keeps working.
   a link annotates it (Cmd/Ctrl-click follows it); buttons, fields, tabs and toggles
   keep working. An artifact can start in annotate mode with
   `<html data-kaya-annotate="on">`; your own toggle wins and is remembered.
+- **Diagrams**: agents are told to draw flows and architecture as hand-authored
+  inline SVG, with an id and a `<title>` on each node, so a click on a node attaches
+  the note to it by name. Mermaid in a `.mermaid` or fenced block still renders,
+  read-only, in the page's light or dark theme. `kaya --help` has the full guidance.
 - **Zoom**: hover a diagram, image or SVG for a zoom control. Wheel to zoom, drag to
   pan. With Annotate on, click a node inside the zoom to comment on it.
 - **Conversation**: the agent's replies and your notes, in order. Each note shows its

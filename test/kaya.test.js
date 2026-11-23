@@ -1190,3 +1190,43 @@ describe('kaya setup hooks repairs stale entries instead of stacking them', () =
     }
   });
 });
+
+describe('flow diagrams follow lavish-axi 0.1.98', () => {
+  it('kaya --help steers diagrams to hand-authored inline SVG, Mermaid only on request', async () => {
+    const { code, stdout } = await kaya(['--help']);
+    expect(code).toBe(0);
+    for (const rule of [
+      'diagrams (flows, architecture, state, concepts):', 'hand-authored inline <svg>, not Mermaid',
+      'Use Mermaid only when', "in the page's light or dark theme", 'viewBox and width:100%',
+      'currentColor', 'stable id and a <title>', 'Do not build boxes and arrows from divs',
+      'light, dark and at phone width',
+    ]) expect(stdout).toContain(rule);
+    expect(stdout).not.toContain('renders automatically, read-only.\n');   // the old one-liner was all the guidance
+  });
+
+  it('regression: Mermaid follows the page theme instead of a forced dark, hand-drawn, half-width look', async () => {
+    // Reproduced on Kaya 0.4.4: a flowchart on a light page rendered as hatched black
+    // boxes, and an LR chart squeezed into 52% of the column had unreadable labels.
+    const { file } = fixture('<!doctype html><html><body><div class="mermaid">flowchart TD\nA[Start] --> B[Finish]</div></body></html>');
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+    const page = await (await fetch(server.address())).text();
+    const runtime = page.slice(page.indexOf('<style data-kaya-mermaid-style>'));
+    expect(runtime).not.toContain('handDrawn');
+    expect(runtime).not.toContain('max-width:52%');
+    expect(runtime).toContain("const theme = pageIsDark() ? 'dark' : 'default';");
+    expect(runtime).toContain("attributeFilter: ['data-theme', 'class', 'style']");   // re-renders on a theme flip
+    expect(runtime).toContain("darkQuery.addEventListener('change', queueRender)");
+    const init = runtime.slice(runtime.indexOf('<script data-kaya-mermaid-init'), runtime.indexOf('</script>', runtime.indexOf('<script data-kaya-mermaid-init')));
+    expect(new Function(init.slice(init.indexOf('>') + 1))).toBeTruthy();
+  });
+
+  it('a click on an SVG diagram node is named by its own <title>, not title and label run together', async () => {
+    const { OVERLAY_SCRIPT } = await import('../src/overlay.js');
+    const ref = OVERLAY_SCRIPT.slice(OVERLAY_SCRIPT.indexOf('function refFor'), OVERLAY_SCRIPT.indexOf('function placeHl'));
+    expect(ref).toContain("c.tagName==='title'");
+    expect(ref.indexOf("c.tagName==='title'")).toBeLessThan(ref.indexOf('clip(el.textContent, 70)'));
+    expect(new Function(OVERLAY_SCRIPT)).toBeTruthy();
+  });
+});

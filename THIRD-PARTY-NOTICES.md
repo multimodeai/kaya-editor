@@ -5,6 +5,10 @@
 The staged-annotation persistence approach in `src/overlay.js` (sessionStorage keyed
 per reviewed file) follows the design used in lavish-axi.
 
+The diagram guidance in `kaya --help` (src/cli.js) condenses lavish-axi 0.1.98's
+`playbook diagram` output, and the theme-aware Mermaid rendering in `src/mermaid.js`
+is adapted from the Mermaid snippet that lavish-axi 0.1.98's `design` command prints.
+
 ```
 MIT License
 
