@@ -596,7 +596,8 @@ diagrams (flows, architecture, state, concepts):
   Draw each one as hand-authored inline <svg>, not Mermaid: you keep control of
   position, size and emphasis, and every node can take a note. Use Mermaid only when
   the user asks for it, or in a Markdown file; a .mermaid or fenced block renders
-  automatically, read-only, in the page's light or dark theme.
+  automatically, read-only. In the review it follows the light or dark background
+  behind it; kaya export embeds it in Mermaid's default light theme.
   Lead with the question the figure answers and assume the reader knows nothing about
   the system. One concept per figure: several simple figures beat one dense one. For a
   large system, draw a small overview and put the detail in cards below it.
