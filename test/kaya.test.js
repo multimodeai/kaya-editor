@@ -694,10 +694,10 @@ import { execFile } from 'node:child_process';
 
 // Run the real installed entrypoint, not main() in-process: exit codes, the
 // --version fast path and stdout-only output are only observable from outside.
-function kaya(args, cwd) {
+function kaya(args, cwd, env = {}) {
   return new Promise((resolveRun) => {
     execFile(process.execPath, [new URL('../bin/kaya.js', import.meta.url).pathname, ...args],
-      { cwd: cwd || process.cwd(), env: { ...process.env, NO_COLOR: '1' } },
+      { cwd: cwd || process.cwd(), env: { ...process.env, NO_COLOR: '1', ...env } },
       (error, stdout, stderr) => resolveRun({ code: error ? error.code : 0, stdout, stderr }));
   });
 }
@@ -1188,5 +1188,139 @@ describe('kaya setup hooks repairs stale entries instead of stacking them', () =
       expect(commands.filter((c) => c.includes('kaya'))).toEqual(['kaya']);
       expect(commands).toContain('gh-axi');
     }
+  });
+});
+
+describe('the tab is named after the file unless the page names itself', () => {
+  it('regression: a <title> in a comment, a template, a script or an inline SVG is not the page title', async () => {
+    const { injectTitle } = await import('../src/overlay.js');
+    const named = (html) => injectTitle(html, 'plan.html').includes('<title>plan.html</title>');
+    expect(named('<html><head></head><body></body></html>')).toBe(true);
+    expect(named('<html><head><title>Mine</title></head><body></body></html>')).toBe(false);
+    // Reproduced on Kaya 0.4.4: each of these left the tab showing the bare address
+    expect(named('<!doctype html><!-- from the old deck: <title>Old deck</title> --><html><head></head><body></body></html>')).toBe(true);
+    expect(named('<html><head></head><body><svg viewBox="0 0 9 9"><title>Flow</title><rect/></svg></body></html>')).toBe(true);
+    expect(named('<html><head></head><body><template><title>x</title></template><script>var t = "<title>x</title>";</script></body></html>')).toBe(true);
+    expect(named('<html><body><svg><svg></svg><title>inner</title></svg><math><title>m</title></math></body></html>')).toBe(true);
+    // a real title after a drawing, or after a self-closed <svg/>, still counts
+    expect(named('<html><body><svg/><svg><title>Flow</title></svg><title>Mine</title></body></html>')).toBe(false);
+  });
+
+  it('regression: Kaya\'s title and dark default go in the real <head>, never into a comment that mentions one', async () => {
+    const { injectTitle, injectBaseTheme } = await import('../src/overlay.js');
+    const page = '<!-- keep the <head> lean --><html><head><meta charset="utf-8"></head><body></body></html>';
+    expect(injectTitle(page, 'plan.html')).toBe('<!-- keep the <head> lean --><html><head><title>plan.html</title><meta charset="utf-8"></head><body></body></html>');
+    expect(injectBaseTheme(page)).toContain('<!-- keep the <head> lean --><html><head><style id="kaya-base">');
+    expect(injectTitle('<html lang="en"><body></body></html>', 'a.html')).toBe('<html lang="en"><head><title>a.html</title></head><body></body></html>');
+    expect(injectTitle('<header>x</header>', 'a.html')).toBe('<head><title>a.html</title></head><header>x</header>');   // <header> is not <head>
+  });
+
+  it('a served page whose only <title> is commented out is named after its file', async () => {
+    const { file } = fixture('<!doctype html><!-- <title>Old deck</title> --><html><head></head><body><h1>Q4</h1></body></html>');
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+    const page = await (await fetch(server.address())).text();
+    expect(page).toContain('<head><title>artifact.html</title>');
+    expect(page).toContain('<!-- <title>Old deck</title> -->');
+  });
+});
+
+async function freePort() {
+  const { createServer } = await import('node:net');
+  return new Promise((resolvePort) => {
+    const probe = createServer().listen(0, '127.0.0.1', () => { const { port } = probe.address(); probe.close(() => resolvePort(port)); });
+  });
+}
+
+// The working directory of a running process, or null where it cannot be read.
+async function processCwd(pid) {
+  const { existsSync, readlinkSync } = await import('node:fs');
+  if (existsSync(`/proc/${pid}/cwd`)) return readlinkSync(`/proc/${pid}/cwd`);
+  const lsof = ['/usr/sbin/lsof', '/usr/bin/lsof'].find((p) => existsSync(p));
+  if (!lsof) return null;
+  const out = await new Promise((resolveRun) => execFile(lsof, ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], (_e, stdout) => resolveRun(stdout || '')));
+  const line = out.split('\n').find((l) => l.startsWith('n'));
+  return line ? line.slice(1) : null;
+}
+
+describe('the shared server runs from the state directory', () => {
+  it('regression: it never holds the folder kaya was first called from', async () => {
+    // Reproduced on Kaya 0.4.4: started from a mounted disk image, the server
+    // kept that disk from ejecting ("Resource busy") though no review was on it.
+    const caller = mkdtempSync(join(tmpdir(), 'kaya-caller-'));
+    tempDirs.push(caller);
+    const { file } = fixture();
+    const env = { KAYA_STATE_DIR: 'state', KAYA_PORT: String(await freePort()) };   // relative on purpose
+    const opened = await kaya(['open', file, '--no-open'], caller, env);
+    try {
+      expect(opened.code).toBe(0);
+      const { realpathSync } = await import('node:fs');
+      const state = join(caller, 'state');
+      // the server resolved the same state folder as the CLI, not state/state
+      const { pid } = JSON.parse(readFileSync(join(state, 'daemon.json'), 'utf8'));
+      const cwd = await processCwd(pid);
+      if (cwd !== null) expect(realpathSync(cwd)).toBe(realpathSync(state));
+    } finally { await kaya(['stop', '--all'], caller, env); }
+  });
+});
+
+describe('discovery checks who answers, not just the recorded address', () => {
+  const states = [];
+  function freshState() { const d = mkdtempSync(join(tmpdir(), 'kaya-state-')); states.push(d); return d; }
+  afterEach(() => { delete process.env.KAYA_STATE_DIR; states.splice(0).forEach((d) => rmSync(d, { recursive: true, force: true })); });
+
+  it('regression: a leftover per-file record never hands out, or stops, another review\'s server', async () => {
+    // A per-file server that died left its record; another review's server later
+    // got the same port. Reproduced on Kaya 0.4.4: opening the first file gave
+    // the second file's URL, and stopping the first file took the second down.
+    const state = freshState();
+    process.env.KAYA_STATE_DIR = state;
+    const { startKayaServer } = await import('../src/server.js');
+    const { writeRegistry, readDaemon } = await import('../src/registry.js');
+    const { file: a } = fixture();
+    const { file: b } = fixture();
+    const other = await startKayaServer(b);
+    writeRegistry(a, { port: other.port, pid: process.pid + 1, host: '127.0.0.1' });
+    const env = { KAYA_STATE_DIR: state, KAYA_PORT: String(await freePort()) };
+    try {
+      const listed = await kaya(['list'], undefined, env);
+      expect(listed.stdout).not.toContain(a);
+      const opened = await kaya(['open', a, '--no-open'], undefined, env);
+      expect(opened.code).toBe(0);
+      expect(opened.stdout).not.toContain(other.address());
+      expect(opened.stdout).toMatch(/\/s\/[0-9a-f]{12}\//);           // its own review on the shared server
+      await kaya(['stop', a], undefined, env);
+      const health = await (await fetch(`${other.address()}__kaya/health`)).json();
+      expect(health.file).toBe(b);                                         // the other review is still up
+    } finally {
+      const daemon = readDaemon();
+      if (daemon) await fetch(`http://127.0.0.1:${daemon.port}/__kaya/shutdown`, { method: 'POST' }).catch(() => {});
+      await other.close();
+    }
+  });
+
+  it('regression: a leftover shared-server record never stops a shared server that is not the one it names', async () => {
+    // A server answering on the recorded port with another process id belongs
+    // to another state folder. Reproduced on Kaya 0.4.4: `kaya stop --all` from
+    // the folder with the leftover record stopped the other folder's reviews and
+    // shut its server down.
+    const first = freshState();
+    process.env.KAYA_STATE_DIR = first;
+    const { KayaDaemon } = await import('../src/server.js');
+    const daemon = new KayaDaemon({ port: 0, idleMs: 60_000 });
+    await daemon.start();
+    try {
+      const { file } = fixture();
+      daemon.open(file);
+      const second = freshState();
+      writeFileSync(join(second, 'daemon.json'), JSON.stringify({ port: daemon.port, host: '127.0.0.1', pid: process.pid + 1, version: '0.0.1' }));
+      const env = { KAYA_STATE_DIR: second, KAYA_PORT: String(daemon.port) };
+      expect((await kaya(['list'], undefined, env)).stdout).not.toContain(file);
+      await kaya(['stop', '--all'], undefined, env);
+      expect(daemon.server).toBeDefined();                                 // still serving
+      expect(daemon.describeAll().map((r) => r.file)).toContain(file);     // its review untouched
+      expect((await fetch(`${daemon.url(file)}__kaya/health`)).status).toBe(200);
+    } finally { await daemon.shutdown(); }
   });
 });

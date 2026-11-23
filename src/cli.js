@@ -8,7 +8,7 @@ import {
 import { DEFAULT_PORT } from './constants.js';
 import { exportHtml } from './export.js';
 import { KayaDaemon, isReviewableFile, startKayaServer } from './server.js';
-import { listRegistries, readDaemon, readRegistry, urlKeyFor } from './registry.js';
+import { listRegistries, readDaemon, readRegistry, registryDirectory, urlKeyFor } from './registry.js';
 import { VERSION } from './version.js';
 
 const cliFile = fileURLToPath(import.meta.url);
@@ -110,23 +110,33 @@ async function getJson(url, timeoutMs = PROBE_MS) {
   return response.json();
 }
 
+// A record only names an address. Whoever answers there now must be the server
+// it recorded: a per-file server that crashed left its record behind, and once
+// another review's server got the same port, opening the first file handed out
+// the second one's URL and stopping it took the other review down.
+function servesFile(health, file) { return Boolean(health && !health.daemon && health.file === resolve(file)); }
+
 async function legacyOrigin(file) {
   const registry = readRegistry(file);
   if (!registry?.port) return null;
   const origin = `http://${registry.host || '127.0.0.1'}:${registry.port}`;
-  try { await getJson(`${origin}/__kaya/health`); return origin; } catch (_error) { return null; }
+  try { return servesFile(await getJson(`${origin}/__kaya/health`), file) ? origin : null; } catch (_error) { return null; }
 }
 
 function daemonOrigin(record = readDaemon()) {
   return record ? `http://${record.host || '127.0.0.1'}:${record.port}` : null;
 }
 
+// The same for the shared server: the process answering must be the one the
+// record names, or a stale record would lead kaya to use, or replace, a shared
+// server that keeps its reviews somewhere else.
 async function liveDaemon() {
-  const origin = daemonOrigin();
+  const record = readDaemon();
+  const origin = daemonOrigin(record);
   if (!origin) return null;
   try {
     const health = await getJson(`${origin}/__kaya/health`);
-    return health.daemon ? { origin, health } : null;
+    return health.daemon && health.pid === record.pid ? { origin, health } : null;
   } catch (_error) { return null; }
 }
 
@@ -150,7 +160,12 @@ async function ensureDaemon() {
     await fetch(`${live.origin}/__kaya/shutdown?restarting=1`, { method: 'POST', signal: AbortSignal.timeout(2000) }).catch(() => {});
     await waitFor(async () => !(await liveDaemon()), 5000);
   }
-  const child = spawn(process.execPath, [cliFile, '--daemon'], { detached: true, stdio: 'ignore' });
+  // Run it from the state directory, not the caller's folder: a long-lived
+  // process holding that folder kept a disk from ejecting and pinned a deleted
+  // worktree. The state directory goes in absolute, since the child resolves
+  // a relative KAYA_STATE_DIR against its own, new, working directory.
+  const state = registryDirectory();
+  const child = spawn(process.execPath, [cliFile, '--daemon'], { detached: true, stdio: 'ignore', cwd: state, env: { ...process.env, KAYA_STATE_DIR: state } });
   child.unref();
   const up = await waitFor(async () => Boolean(await liveDaemon()));
   if (!up) {
@@ -199,7 +214,7 @@ async function liveSessions() {
     const origin = `http://${r.host || '127.0.0.1'}:${r.port}`;
     try {
       const info = await getJson(`${origin}/__kaya/health`, 600);
-      if (rows.some((row) => row.file === r.file)) continue;
+      if (!servesFile(info, r.file) || rows.some((row) => row.file === r.file)) continue;
       rows.push({ file: r.file, url: `${origin}/`, ended: Boolean(info.ended), staged: info.staged || 0, unread: 0, lastActivity: info.lastActivity || 0, shared: false });
     } catch (_error) { /* dead per-file server, not a live review */ }
   }

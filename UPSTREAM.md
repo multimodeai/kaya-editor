@@ -17,10 +17,10 @@ Items marked `open` below are the ones the agent left for a human decision.
 The check script reads and rewrites this block. Keep the format.
 
 ```upstream
-lavish-axi: 0.1.97
+lavish-axi: 0.1.98
 axi-sdk-js: 0.1.14
-axi-spec: 8033e86e32f2
-reviewed: 2026-11-16
+axi-spec: 039ebe11a0c8
+reviewed: 2026-11-23
 ```
 
 | Source | What it is | Where the check reads it |
@@ -73,6 +73,9 @@ Declined items stay declined. They are recorded so the same question is not re-a
 | Repair every stale managed SessionStart hook, not only the first | axi-sdk-js 0.1.14 | adopted | Reproduced on Kaya: with two old `kaya` entries in Claude's settings, `kaya setup hooks` fixed the first and left the second, so every new session ran Kaya twice. SDK bumped to 0.1.14; the same fix covers the Codex hooks file |
 | Keep annotation selectors unique so a click reopens only its own queued note | lavish-axi 0.1.97 | adopted | Reproduced on Kaya: two look-alike cards nested seven deep, or two elements sharing an id, got the same selector, so clicking the second opened the first one's note for editing. Ids are used only when unique, the depth cap is gone, and the full path from `<body>` is the fallback |
 | Place the reveal marker on the settled target after the smooth scroll | lavish-axi 0.1.97 | adapted | Kaya's only scroll-and-mark is the layout-issue jump. Reproduced: on a long page the marker was placed on a 320ms timer while the scroll took 1.5s, leaving it ~9,600px off. It now follows the element each frame until it holds still |
+| Run the shared server from the state dir, not the caller's folder | lavish-axi 0.1.98 | adopted | Reproduced on Kaya: started from a mounted disk, the server kept that disk from ejecting ("Resource busy") though no review was on it, and it pinned deleted worktrees the same way. The state dir is handed to it absolute, so a relative `KAYA_STATE_DIR` still means the same folder |
+| Stop discovery from retiring the kept server through a proxy alias | lavish-axi 0.1.98 | adapted | Kaya has no proxy aliases, but it trusted whatever answered at a recorded address. Reproduced: a leftover per-file record handed out another review's URL and `kaya stop` took that review down; a leftover shared-server record in another state folder made `kaya stop --all` shut that folder's server. Discovery now checks the answering server's file or process id |
+| Ignore HTML comments when reading the artifact title | lavish-axi 0.1.98 | adapted | Kaya reads the title only to decide whether to name the tab after the file. Reproduced: a `<title>` in a comment, or inside an inline SVG diagram, left the tab showing the bare address. The same scan puts Kaya's title and dark default in the real `<head>`, never inside a comment that mentions one |
 | Navigate the artifact frame from one place | lavish-axi 0.1.93 | declined | Not applicable: Kaya serves the artifact as the page, there is no frame |
 | Skip unresolved Tailscale binaries | lavish-axi 0.1.96 | declined | Kaya is local-only and never probes Tailscale |
 | Design reference: Lavish modifies served files | lavish-axi 0.1.92 | declined | Playbook content, declined with playbooks; Kaya's README already says it injects an overlay |
