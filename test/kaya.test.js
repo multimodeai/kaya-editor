@@ -437,6 +437,19 @@ describe('Kaya offline export', () => {
     expect(await exportHtml(file, outFile)).toBe(outFile);
     expect(readFileSync(outFile, 'utf8')).toContain('data-kaya-vendor="daisyui"');
   }, 30000);
+
+  it("regression: a Markdown export draws Mermaid in the dark theme of Kaya's dark Markdown page", async () => {
+    // Exporting a Markdown file from the review menu drew Mermaid in the default light
+    // theme: near-black lines and labels on the page's #131313 code panel.
+    const { directory } = fixture();
+    const file = join(directory, 'spec.md');
+    writeFileSync(file, '# Spec\n\n```mermaid\nflowchart TD\nA[Start] --> B[Finish]\n```\n');
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+    const exported = await (await fetch(`${server.address()}__kaya/export`)).text();
+    expect(exported).toMatch(/\.node rect[^{]*\{fill:#1f2020/i);   // Mermaid's dark theme node fill
+  }, 30000);
 });
 
 describe('staged annotations survive reload', () => {
@@ -1220,7 +1233,8 @@ describe('flow diagrams follow lavish-axi 0.1.98', () => {
     expect(code).toBe(0);
     for (const rule of [
       'diagrams (flows, architecture, state, concepts):', 'hand-authored inline <svg>, not Mermaid',
-      'Use Mermaid only when', 'follows the light or dark background', "kaya export embeds it in Mermaid's default light theme",
+      'Use Mermaid only when', 'follows the light or dark background',
+      "an export uses Mermaid's default light theme for an HTML artifact", 'its dark theme for a Markdown file',
       'viewBox and width:100%',
       'currentColor', 'stable id and a <title>', 'Do not build boxes and arrows from divs',
       'light, dark and at phone width',
@@ -1241,7 +1255,8 @@ describe('flow diagrams follow lavish-axi 0.1.98', () => {
   it.skipIf(!chrome)('regression: each Mermaid diagram takes the theme of the background behind it', async () => {
     // Reproduced on Kaya 0.4.4: a flowchart on a light page rendered as dark boxes
     // with light gray labels. Kaya paints <html> and <body> dark under every
-    // artifact, so a light wrapper or a gradient body was still read as dark.
+    // artifact, so a diagram in a light wrapper, or in a gradient section that sets
+    // its own dark text, was still read as dark.
     const flow = 'flowchart TD\nA[Start] --> B[Finish]';
     const dom = await servedDom(`<!doctype html><html><body>
 <div class="mermaid" data-case="kaya-dark-base">${flow}</div>

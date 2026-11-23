@@ -64,9 +64,10 @@ rewritten, so tooling that parses your raw Markdown keeps working.
 - **Diagrams**: agents are told to draw flows and architecture as hand-authored
   inline SVG, with an id and a `<title>` on each node, so a click on a node attaches
   the note to it by name. Mermaid in a `.mermaid` or fenced block still renders,
-  read-only: in the review it follows the light or dark background behind it, and
-  `kaya export` embeds it in Mermaid's default light theme. `kaya --help` has the
-  full guidance.
+  read-only: in the review it follows the light or dark background behind it; an
+  export embeds it in Mermaid's default light theme for an HTML artifact and in its
+  dark theme for a Markdown file, which Kaya always shows dark. `kaya --help` has
+  the full guidance.
 - **Zoom**: hover a diagram, image or SVG for a zoom control. Wheel to zoom, drag to
   pan. With Annotate on, click a node inside the zoom to comment on it.
 - **Conversation**: the agent's replies and your notes, in order. Each note shows its

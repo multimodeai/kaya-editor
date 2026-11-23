@@ -73,7 +73,7 @@ function removeRemoteResourceAttributes(html) {
 
 export async function inlineAssets(inputHtml, sourceFile) {
   const base = dirname(resolve(sourceFile));
-  let html = await prerenderMermaid(inputHtml);
+  let html = await prerenderMermaid(inputHtml, /\.(md|markdown)$/i.test(sourceFile) ? 'dark' : 'default');
   html = inlineLocalStyles(html, base);
 
   html = html.replace(/<link\b([^>]*?)\bhref=["']([^"']+)["']([^>]*)>/gi, (match, before, reference, after) => {

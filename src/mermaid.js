@@ -55,7 +55,7 @@ function chromeArgs(file, profile) {
   ];
 }
 
-function renderDocument(source) {
+function renderDocument(source, theme) {
   const browser = browserCommand();
   if (!browser) {
     throw new Error('real Mermaid export requires Chrome or Chromium; set KAYA_BROWSER to its executable');
@@ -70,7 +70,7 @@ function renderDocument(source) {
   const html = `<!doctype html><meta charset="utf-8"><body><div id="kaya-export-target"></div><script src="${runtimeUrl}"></script><script>
 (async () => {
   try {
-    mermaid.initialize({ startOnLoad: false, securityLevel: 'loose', theme: 'default', deterministicIds: true, deterministicIDSeed: 'kaya' });
+    mermaid.initialize({ startOnLoad: false, securityLevel: 'loose', theme: ${JSON.stringify(theme)}, deterministicIds: true, deterministicIDSeed: 'kaya' });
     const source = decodeURIComponent(Array.from(atob('${sourceBase64}'), (char) => '%' + char.charCodeAt(0).toString(16).padStart(2, '0')).join(''));
     const result = await mermaid.render('kaya-export-diagram', source);
     document.getElementById('kaya-export-target').innerHTML = '<!--KAYA_SVG_BEGIN-->' + result.svg + '<!--KAYA_SVG_END-->';
@@ -130,6 +130,7 @@ export function mermaidRuntime() {
 export function mermaidRuntimeMarkup() {
   return `<style data-kaya-mermaid-style>.mermaid svg,[data-kaya-mermaid-source] svg{max-width:100%;height:auto;}</style><script data-kaya-mermaid-runtime="${VERSION}" src="/__kaya/mermaid-runtime.js"></script><script data-kaya-mermaid-init="${VERSION}">
 (() => {
+  mermaid.initialize({ startOnLoad: false, securityLevel: 'loose' });
   const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
   // Normalize any CSS color (rgb, oklch, named...) to [r, g, b, a] bytes.
   const paint = document.createElement('canvas').getContext('2d');
@@ -205,18 +206,19 @@ export function injectMermaidRuntime(html) {
   return insertBeforeBodyEnd(html, markup);
 }
 
-export async function renderMermaidSource(source) {
-  if (!renderedCache.has(source)) renderedCache.set(source, renderDocument(source));
-  try { return await renderedCache.get(source); }
-  catch (error) { renderedCache.delete(source); throw error; }
+export async function renderMermaidSource(source, theme = 'default') {
+  const key = `${theme}\n${source}`;
+  if (!renderedCache.has(key)) renderedCache.set(key, renderDocument(source, theme));
+  try { return await renderedCache.get(key); }
+  catch (error) { renderedCache.delete(key); throw error; }
 }
 
-export async function prerenderMermaid(html) {
+export async function prerenderMermaid(html, theme = 'default') {
   const replacements = [];
   const template = html.replace(/(<(?:div|pre|section)[^>]*class=["'][^"']*\bmermaid\b[^"']*["'][^>]*>)([\s\S]*?)(<\/(?:div|pre|section)>)/gi, (_match, open, content, close) => {
     const source = sourceFromContent(content);
     const token = `KAYA_MERMAID_REPLACEMENT_${replacements.length}_${Buffer.from(source).toString('base64url')}`;
-    replacements.push({ token, open, source, close, rendered: renderMermaidSource(source) });
+    replacements.push({ token, open, source, close, rendered: renderMermaidSource(source, theme) });
     return token;
   });
   let output = template;
