@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { exportHtml, inlineAssets } from '../src/export.js';
 import { KayaReviewServer } from '../src/server.js';
+import { browserCommand } from '../src/mermaid.js';
 
 const activeServers = [];
 const tempDirs = [];
@@ -423,6 +425,7 @@ describe('Kaya offline export', () => {
     expect(output).toContain('4.2.4');
     expect(output).toContain('<svg');
     expect(output).toContain('marker-end=');
+    expect(output).toMatch(/\.node rect[^{]*\{fill:#ECECFF/i);   // Mermaid's default light theme
     expect(output).not.toContain('cdn.jsdelivr.net');
     expect(output).not.toContain('src="images/pixel.png"');
     expect(output).not.toMatch(/\b(?:src|href)=["']https?:/i);
@@ -433,6 +436,19 @@ describe('Kaya offline export', () => {
     const outFile = join(directory, 'offline.html');
     expect(await exportHtml(file, outFile)).toBe(outFile);
     expect(readFileSync(outFile, 'utf8')).toContain('data-kaya-vendor="daisyui"');
+  }, 30000);
+
+  it("regression: a Markdown export draws Mermaid in the dark theme of Kaya's dark Markdown page", async () => {
+    // Exporting a Markdown file from the review menu drew Mermaid in the default light
+    // theme: near-black lines and labels on the page's #131313 code panel.
+    const { directory } = fixture();
+    const file = join(directory, 'spec.md');
+    writeFileSync(file, '# Spec\n\n```mermaid\nflowchart TD\nA[Start] --> B[Finish]\n```\n');
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+    const exported = await (await fetch(`${server.address()}__kaya/export`)).text();
+    expect(exported).toMatch(/\.node rect[^{]*\{fill:#1f2020/i);   // Mermaid's dark theme node fill
   }, 30000);
 });
 
@@ -1189,4 +1205,105 @@ describe('kaya setup hooks repairs stale entries instead of stacking them', () =
       expect(commands).toContain('gh-axi');
     }
   });
+});
+
+// Load an artifact through a real review server in headless Chrome and return the
+// DOM once its scripts have run, so rendering and clicks are checked as a browser does them.
+const chrome = browserCommand();
+async function servedDom(content) {
+  const { directory, file } = fixture(content);
+  const server = new KayaReviewServer(file);
+  activeServers.push(server);
+  await server.start();
+  return new Promise((resolveDom, rejectDom) => {
+    const child = spawn(chrome, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-sandbox', '--disable-extensions',
+      '--virtual-time-budget=8000', `--user-data-dir=${join(directory, 'profile')}`, '--dump-dom', server.address()],
+      { stdio: ['ignore', 'pipe', 'ignore'] });
+    let dom = '';
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => { dom += chunk; });
+    child.on('error', rejectDom);
+    child.on('close', () => resolveDom(dom));
+  });
+}
+
+describe('flow diagrams follow lavish-axi 0.1.98', () => {
+  it('kaya --help steers diagrams to hand-authored inline SVG, Mermaid only on request', async () => {
+    const { code, stdout } = await kaya(['--help']);
+    expect(code).toBe(0);
+    for (const rule of [
+      'diagrams (flows, architecture, state, concepts):', 'hand-authored inline <svg>, not Mermaid',
+      'Use Mermaid only when', 'follows the light or dark background',
+      "An exported HTML artifact embeds it in Mermaid's default light theme",
+      "a Markdown file exported with the review page's Export standalone HTML embeds it", "in Mermaid's dark theme.",
+      'viewBox and width:100%',
+      'currentColor', 'stable id and a <title>', 'Do not build boxes and arrows from divs',
+      'light, dark and at phone width',
+    ]) expect(stdout).toContain(rule);
+    expect(stdout).not.toContain('renders automatically, read-only.\n');   // the old one-liner was all the guidance
+  });
+
+  // Mermaid's published theme defaults: a flowchart node is filled #ECECFF in the
+  // default theme and #1f2020 in the dark theme.
+  const LIGHT_NODE = '#ececff', DARK_NODE = '#1f2020';
+  function nodeFill(dom, name) {
+    const at = dom.indexOf(`data-case="${name}"`);
+    const next = dom.indexOf('data-case="', at + 1);
+    const fill = dom.slice(at, next === -1 ? undefined : next).match(/\.node rect[^{]*\{fill:(#[0-9a-f]+)/i);
+    return fill && fill[1].toLowerCase();
+  }
+
+  it.skipIf(!chrome)('regression: each Mermaid diagram takes the theme of the background behind it', async () => {
+    // Reproduced on Kaya 0.4.4: a flowchart on a light page rendered as dark boxes
+    // with light gray labels. Kaya paints <html> and <body> dark under every
+    // artifact, so a diagram in a light wrapper, or in a gradient section that sets
+    // its own dark text, was still read as dark.
+    const flow = 'flowchart TD\nA[Start] --> B[Finish]';
+    const dom = await servedDom(`<!doctype html><html><body>
+<div class="mermaid" data-case="kaya-dark-base">${flow}</div>
+<div style="background:#fff;color:#111"><div class="mermaid" data-case="white-wrapper">${flow}</div></div>
+<section style="background:linear-gradient(#fff,#f1f5f9);color:#1e293b"><div class="mermaid" data-case="light-gradient">${flow}</div></section>
+<section style="background:linear-gradient(#0f172a,#1e293b);color:#e2e8f0"><div class="mermaid" data-case="dark-gradient">${flow}</div></section>
+</body></html>`);
+    expect(nodeFill(dom, 'kaya-dark-base')).toBe(DARK_NODE);
+    expect(nodeFill(dom, 'white-wrapper')).toBe(LIGHT_NODE);
+    expect(nodeFill(dom, 'light-gradient')).toBe(LIGHT_NODE);
+    expect(nodeFill(dom, 'dark-gradient')).toBe(DARK_NODE);
+  }, 30000);
+
+  it.skipIf(!chrome)('regression: one broken diagram does not make every page change redraw the others', async () => {
+    // Mermaid draws the valid diagrams and then throws for the broken one. Kaya then
+    // never recorded a theme, so every class change or form change redrew them all.
+    const dom = await servedDom(`<!doctype html><html><body>
+<div class="mermaid">flowchart TD\nA[Start] --> B[Finish]</div>
+<div class="mermaid">flowchart TD\nA[Start --></div>
+<script>
+let drawn = 0;
+new MutationObserver((records) => {
+  for (const r of records) if (r.target.classList && r.target.classList.contains('mermaid')) for (const n of r.addedNodes) if (n.nodeName.toLowerCase() === 'svg') drawn++;
+}).observe(document.body, { childList: true, subtree: true });
+window.addEventListener('load', () => setTimeout(() => {
+  const before = drawn;
+  document.documentElement.classList.add('flip');
+  document.dispatchEvent(new Event('change'));
+  setTimeout(() => document.body.setAttribute('data-drawn', before + ' then ' + drawn), 2000);
+}, 2000));
+</script></body></html>`);
+    const [, before, after] = dom.match(/data-drawn="(\d+) then (\d+)"/) || [];
+    expect(Number(before)).toBeGreaterThan(0);
+    expect(after).toBe(before);
+  }, 30000);
+
+  it.skipIf(!chrome)('a click on an SVG diagram node is named by its own <title>, not title and label run together', async () => {
+    // The contract in the README and kaya --help: "the note is named by the title".
+    const dom = await servedDom(`<!doctype html><html data-kaya-annotate="on"><body><main style="padding:40px">
+<svg viewBox="0 0 200 100" width="200" height="100"><g id="n1"><title>API gateway</title><rect x="10" y="10" width="80" height="40" fill="#ccc"/><text x="20" y="35">API</text></g></svg>
+</main><script>
+window.addEventListener('load', () => setTimeout(() => {
+  const rect = document.querySelector('#n1 rect'), box = rect.getBoundingClientRect();
+  rect.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: box.left + 5, clientY: box.top + 5 }));
+}, 500));
+</script></body></html>`);
+    expect((dom.match(/<div id="kaya-pop"[^>]*><div[^>]*data-pop-head[^>]*>([\s\S]*?)<\/div>/) || [])[1]).toBe('Annotate <b>API gateway</b>');
+  }, 30000);
 });

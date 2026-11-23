@@ -576,20 +576,42 @@ delegating:
   must report the full URL back, and that it must poll before ending its turn.
 
 writing the artifact:
-  Lead with the decision, the risk and the next action. Prefer sections, cards, tables
-  and diagrams over prose. Give nested grid and flex children minmax(0,1fr) and
+  Lead with the decision, the risk and the next action. Show, don't tell: explain flows,
+  relationships and comparisons with labeled figures (see diagrams below), and show
+  real UI as a screenshot rather than describing it. Structure the prose that remains
+  with sections, cards and tables. Give nested grid and flex children minmax(0,1fr) and
   min-width:0 so nothing overflows sideways; only tables, diagrams and code may scroll,
-  inside their own container. Show real UI as a screenshot rather than describing it.
+  inside their own container.
   Match the design system of the project the artifact is ABOUT, or the look the user
   asked for; write self-contained CSS only when neither exists, and say which you used.
   Annotate starts off. Put <html data-kaya-annotate="on"> on a layout or frontend the
   user should mark up, and leave it off for a page of choices to click; the reviewer's
   own toggle overrides it and is remembered. In annotate mode a click on a link
   annotates it (Cmd/Ctrl-click follows it); form controls and ARIA widgets still work.
-  Mermaid in a .mermaid or fenced block renders automatically, read-only.
   <div data-kaya-ask="id" data-kaya-label="Question?" data-kaya-options="a|b|c">
   renders one-click choices whose answers come back typed, as [ask] id = value.
   Assets sit beside the artifact and are referenced relatively, never with a leading /.
+
+diagrams (flows, architecture, state, concepts):
+  Draw each one as hand-authored inline <svg>, not Mermaid: you keep control of
+  position, size and emphasis, and every node can take a note. Use Mermaid only when
+  the user asks for it, or in a Markdown file; a .mermaid or fenced block renders
+  automatically, read-only. In the review it follows the light or dark background
+  behind it. An exported HTML artifact embeds it in Mermaid's default light theme;
+  a Markdown file exported with the review page's Export standalone HTML embeds it
+  in Mermaid's dark theme.
+  Lead with the question the figure answers and assume the reader knows nothing about
+  the system. One concept per figure: several simple figures beat one dense one. For a
+  large system, draw a small overview and put the detail in cards below it.
+  Size with viewBox and width:100%, never fixed pixels, and keep everything inside the
+  viewBox. Color through currentColor and the page's CSS variables so the figure
+  follows light and dark themes. Keep labels to a few words (SVG text does not wrap)
+  and put the explanation beside the figure in HTML. No external images, fonts or
+  scripts inside it.
+  Give every node, edge and region a stable id and a <title>: a click lands on it and
+  the note is named by the title. Label an uncertain relationship as a question.
+  Do not build boxes and arrows from divs. Look at it in light, dark and at phone width
+  before opening the review: Kaya's layout check cannot see inside an SVG.
 
 environment:
   KAYA_PORT                 Port of the shared review server (default ${DEFAULT_PORT})

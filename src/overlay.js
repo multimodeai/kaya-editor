@@ -218,6 +218,13 @@ export const OVERLAY_SCRIPT = `
     return el && el.closest ? (el.closest('svg') || el) : el;
   }
   function refFor(el){
+    // A diagram node names itself with its own <title>; its textContent would run
+    // that title and the visible label together.
+    if(isSvg(el)){
+      const own=Array.prototype.find.call(el.children||[], function(c){ return c.tagName==='title'; });
+      const named=own && clip(own.textContent, 70);
+      if(named) return named;
+    }
     const t=clip(el.textContent, 70);
     if(t) return t;
     if(el.id) return el.id;
