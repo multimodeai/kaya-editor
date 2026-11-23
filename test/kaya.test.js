@@ -1307,4 +1307,3 @@ window.addEventListener('load', () => setTimeout(() => {
     expect((dom.match(/<div id="kaya-pop"[^>]*><div[^>]*data-pop-head[^>]*>([\s\S]*?)<\/div>/) || [])[1]).toBe('Annotate <b>API gateway</b>');
   }, 30000);
 });
-
