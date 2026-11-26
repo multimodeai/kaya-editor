@@ -56,7 +56,7 @@ function usage(command, message) {
 
 const SPECS = {
   open: { usage: 'kaya open <file> [--reopen] [--no-open]', flags: { '--reopen': 'boolean', '--no-open': 'boolean' }, min: 1, argName: 'an artifact file' },
-  poll: { usage: 'kaya poll <file> [--agent-reply "<message>"] [--receipt "n1=addressed: ..."]', flags: { '--agent-reply': 'string', '--receipt': 'string' }, min: 1, argName: 'an artifact file' },
+  poll: { usage: 'kaya poll <file> [--agent-reply "<message>"] [--receipt "n1=addressed: ..."] [--keep-waiting]', flags: { '--agent-reply': 'string', '--receipt': 'string', '--keep-waiting': 'boolean' }, min: 1, argName: 'an artifact file' },
   reply: { usage: 'kaya reply <file> --agent-reply "<message>" [--receipt "n1=addressed: ..."]', flags: { '--agent-reply': 'string', '--receipt': 'string' }, min: 1, argName: 'an artifact file' },
   list: { usage: 'kaya list', flags: {} },
   end: { usage: 'kaya end <file>', flags: {}, min: 1, argName: 'an artifact file' },
@@ -301,7 +301,7 @@ function userEnded(target) {
 // Notes are deliberately never truncated, unlike AXI's usual large-field rule:
 // they are the payload, and an agent skimming a shortened batch is exactly how
 // "answered only the first annotation" happened.
-function feedbackOutput(target, d) {
+function feedbackOutput(target, d, { keepWaiting = false } = {}) {
   const n = d.feedback.length;
   const status = d.superseded ? 'superseded by a newer poll' : d.ended ? `ended by ${d.endedBy || 'the user'}` : d.disconnected ? 'review window disconnected' : 'feedback';
   const out = { poll: { file: display(target), status, items: n } };
@@ -329,11 +329,11 @@ function feedbackOutput(target, d) {
       ? `This review has ended. Stop polling ${f}. Deliver remaining updates in the conversation, or run \`kaya open ${f}\` if the user needs another visual round.`
       : `The user ended this review. Stop polling ${f} and do not reopen it uninvited. Deliver any remaining updates in the conversation.`;
   } else if (d.disconnected) {
-    out.next_step = 'The review window was closed or disconnected. The session is still open and resumable. Ask the user whether to reopen it or end it, and do neither uninvited. Do not keep polling in a loop while it is disconnected.';
+    out.next_step = 'The review window was closed or disconnected. The session is still open and resumable. Ask the user whether to reopen it or end it, and do neither uninvited. Do not keep polling in a loop while it is disconnected. If you poll in the background and your harness wakes you when that command finishes, poll again with --keep-waiting instead: it waits for the user to come back.';
   } else {
     const ids = [...(d.unaccounted || []), ...d.feedback.map((item) => item.id).filter(Boolean)];
     const example = ids.slice(0, 2).map((id, i) => `${id}=${i === 0 ? 'addressed' : 'deferred'}: <${i === 0 ? 'what you did' : 'why'}>`).join('; ');
-    out.next_step = `${n === 1 ? 'Address the item above' : `Address every one of the ${n} items above`}${d.unaccounted?.length ? `, plus ${d.unaccounted.join(', ')} still unaccounted for from earlier` : ''}, apply the changes to ${f}, then run \`kaya poll ${f} --agent-reply "<what changed>" --receipt "${example}"\` BEFORE replying to the user anywhere else. The receipt must give every id (${ids.join(', ')}) an outcome: addressed, deferred or rejected. Do not answer outside Kaya while this review is open. Poll delivery consumes the response, so read it completely.`;
+    out.next_step = `${n === 1 ? 'Address the item above' : `Address every one of the ${n} items above`}${d.unaccounted?.length ? `, plus ${d.unaccounted.join(', ')} still unaccounted for from earlier` : ''}, apply the changes to ${f}, then run \`kaya poll ${f}${keepWaiting ? ' --keep-waiting' : ''} --agent-reply "<what changed>" --receipt "${example}"\` BEFORE replying to the user anywhere else. The receipt must give every id (${ids.join(', ')}) an outcome: addressed, deferred or rejected. Do not answer outside Kaya while this review is open. Poll delivery consumes the response, so read it completely.`;
     if (d.held > 0) out.next_step += ` The user also has ${d.held} note${d.held === 1 ? '' : 's'} typed but not sent; those arrive only when they press Send.`;
   }
   return out;
@@ -354,6 +354,7 @@ async function poll(args) {
     const params = new URLSearchParams({ format: 'json' });
     if (!replySent && flags['--agent-reply']) params.set('agent_reply', flags['--agent-reply']);
     if (!replySent && receipt.length) params.set('receipt', JSON.stringify(receipt));
+    if (flags['--keep-waiting']) params.set('keep_waiting', '1');
     let response;
     try { response = await requestTo(target, `/__kaya/poll?${params}`); }
     catch (error) {
@@ -373,7 +374,7 @@ async function poll(args) {
       continue;
     }
     const delivery = await response.json();
-    if (delivery.feedback.length || delivery.ended || delivery.disconnected || delivery.superseded) return feedbackOutput(target, delivery);
+    if (delivery.feedback.length || delivery.ended || delivery.disconnected || delivery.superseded) return feedbackOutput(target, delivery, { keepWaiting: Boolean(flags['--keep-waiting']) });
   }
 }
 
@@ -563,8 +564,13 @@ rules that are easy to get wrong:
   One poll per review. A newer poll retires an older one, which is told to stop.
   Do not re-run open after editing the artifact. The open tab live-reloads.
   "held" counts notes the user has typed but NOT sent. They arrive only on Send.
-  "review window disconnected" means the tab was closed. The review is still resumable:
-  ask the user whether to reopen or end it, and do neither alone.
+  Polling in the background? Add --keep-waiting when your harness wakes you as soon as
+  a background command finishes (Claude Code's run_in_background does). The poll then
+  stays attached when the tab closes or drops, and also waits when no tab is open yet,
+  so notes the user sends after coming back still reach you. Never add it to a
+  foreground poll: it holds your turn until the user returns.
+  Without it, "review window disconnected" means the tab was closed. The review is
+  still resumable: ask the user whether to reopen or end it, and do neither alone.
   An ended review ends the loop. Stop polling. Do not reopen uninvited.
   Reviews share one server on a fixed port. It moves onto a newer kaya by itself the
   next time \`kaya open\` or \`kaya poll\` runs, keeping every review, URL and unsent
@@ -618,7 +624,8 @@ environment:
   KAYA_STATE_DIR            Where reviews, conversations and attachments are kept
   KAYA_IDLE_TIMEOUT_MS      Idle time before the server stops itself (default 30 minutes)
   KAYA_DISCONNECT_GRACE_MS  How long a closed review tab may come back before a poll
-                            reports it disconnected (default 15000)
+                            reports it disconnected (default 15000). A poll with
+                            --keep-waiting never reports it and keeps waiting
   KAYA_BROWSER              Chrome or Chromium that pre-renders Mermaid for export`;
 
 const COMMAND_HELP = {
@@ -629,13 +636,17 @@ const COMMAND_HELP = {
 examples:
   kaya open .kaya/plan.html
   kaya .kaya/spec.md --no-open`,
-  poll: `usage: kaya poll <file> [--agent-reply "<message>"] [--receipt "<id>=<outcome>: <note>; ..."]
+  poll: `usage: kaya poll <file> [--agent-reply "<message>"] [--receipt "<id>=<outcome>: <note>; ..."] [--keep-waiting]
   Blocks until the user sends notes, ends the review, or closes the window.
   Only one poll listens per review; a newer one retires this one.
   --agent-reply   shown to the user in the review before waiting again
   --receipt       an outcome for every delivered note: addressed, deferred or rejected
+  --keep-waiting  do not stop when the review window closes or drops, and wait even if
+                  no window is open yet; returns only on notes or an end. For background
+                  polls whose harness wakes you when they finish, never a foreground poll
 examples:
   kaya poll .kaya/plan.html --agent-reply "Plan is up; start with the risks section"
+  kaya poll .kaya/plan.html --keep-waiting --agent-reply "Plan is up"   (run in the background)
   kaya poll .kaya/plan.html --agent-reply "Applied your notes" --receipt "n1=addressed: warmer title; n2=deferred: needs Q3 figures"`,
   reply: `usage: kaya reply <file> --agent-reply "<message>" [--receipt "<id>=<outcome>: <note>; ..."]
   Shows a reply in the review and exits once the server accepts it, without waiting
