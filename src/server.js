@@ -221,6 +221,9 @@ export class ReviewSession {
   // past the grace period, wake any attached poll instead of letting it hang on
   // a tab that is not there. Runs on a timer because a closed browser sends no
   // further requests, so nothing else would ever notice.
+  // A poll that asked to keep waiting (a background listener the harness wakes
+  // on completion) is left attached: the reviewer may reopen the tab and send
+  // later, and a listener woken here would leave those notes unread.
   sweepClients() {
     const now = Date.now();
     for (const [id, t] of this.clients) if (now - t > CLIENT_STALE_MS) this.clients.delete(id);
@@ -229,10 +232,10 @@ export class ReviewSession {
     if (!this.browserSeen || this.ended) return;
     if (now - this.lastClientAt < DISCONNECT_GRACE_MS) return;  // a reload is not a disconnect
     this.disconnected = true;
-    if (this.waiters.size) {
+    const released = [...this.waiters].filter((waiter) => !waiter.keepWaiting);
+    if (released.length) {
       const result = { feedback: this.queue.splice(0), ended: this.ended, disconnected: true };
-      for (const waiter of this.waiters) waiter(result);
-      this.waiters.clear();
+      for (const waiter of released) { this.waiters.delete(waiter); waiter(result); }
       this.persistState();
     }
   }
@@ -358,7 +361,7 @@ export class ReviewSession {
     this.notify();
   }
 
-  poll(agentReply, { receipt = [], exclusive = false, connection } = {}) {
+  poll(agentReply, { receipt = [], exclusive = false, connection, keepWaiting = false } = {}) {
     if ((typeof agentReply === 'string' && agentReply) || receipt.length) this.recordReply(agentReply || '', receipt);
     this.lastWaiterAt = Date.now();
     // One listener per review. A newer poll retires the older one, which is told
@@ -377,9 +380,12 @@ export class ReviewSession {
       return Promise.resolve(result);
     }
     // Already known gone: answer at once rather than holding the agent on a tab
-    // that is not coming back. The next_step tells it to ask rather than re-poll.
-    if (this.disconnected) return Promise.resolve({ feedback: [], ended: this.ended, disconnected: true });
+    // that is not coming back. The CLI's next_step tells a foreground poller to
+    // ask the user, and a background one to re-poll with --keep-waiting.
+    // A keep-waiting poll waits for the reviewer to come back instead.
+    if (this.disconnected && !keepWaiting) return Promise.resolve({ feedback: [], ended: this.ended, disconnected: true });
     return new Promise((resolvePoll) => {
+      resolvePoll.keepWaiting = keepWaiting;
       this.waiters.add(resolvePoll);
       // Bounded long-poll: resolve with an empty keep-alive well inside the
       // client's fetch/header timeout so the agent just re-polls instead of
@@ -483,6 +489,7 @@ export class ReviewSession {
       const result = await this.poll(url.searchParams.get('agent_reply') || undefined, {
         receipt: Array.isArray(receipt) ? receipt : [],
         exclusive: url.searchParams.get('format') === 'json',
+        keepWaiting: url.searchParams.get('keep_waiting') === '1',
         connection,
       });
       // Gone before we could answer: give anything meant for it back to the queue.

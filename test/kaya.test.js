@@ -227,6 +227,85 @@ describe('Kaya HTTP review server', () => {
     expect(server.disconnected).toBe(false);
   });
 
+  // Reproduced 26 Nov 2026: a background poll ended 16s after the tab closed, a
+  // re-poll answered "disconnected" at once while it stayed closed, and a note sent
+  // after the tab came back sat unread under "No agent listening" until the agent
+  // happened to poll again. --keep-waiting keeps that listener attached.
+  const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+  const pending = (promise, ms = 120) => Promise.race([promise, pause(ms).then(() => 'still waiting')]);
+  const presenceOf = async (server) => (await (await fetch(`${server.address()}__kaya/state`)).json()).presence;
+  const sendNote = (server, text) => fetch(`${server.address()}__kaya/feedback`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ items: [{ text }] }),
+  });
+  function tabGone(server) {
+    server.lastClientAt = Date.now() - 60000;
+    server.clients.clear();
+    server.sweepClients();
+  }
+
+  it('regression: a keep-waiting poll stays attached through a closed tab and gets notes sent after it comes back', async () => {
+    const { file } = fixture();
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+
+    await fetch(`${server.address()}__kaya/state?client=c1`);   // the review tab is open
+    const polling = fetch(`${server.address()}__kaya/poll?format=json&keep_waiting=1`).then((r) => r.json());
+    await pause(40);
+    tabGone(server);                                           // closed, past the grace period
+    expect(server.disconnected).toBe(true);
+    expect(await pending(polling)).toBe('still waiting');      // a plain poll would have returned here
+    expect(await presenceOf(server)).toBe('listening');        // and the reviewer sees it is still there
+
+    await fetch(`${server.address()}__kaya/state?client=c2`);   // the reviewer reopens the page
+    expect(server.disconnected).toBe(false);
+    await sendNote(server, 'sent after coming back');
+    const d = await polling;
+    expect(d.feedback.map((f) => f.note)).toEqual(['sent after coming back']);
+    expect(d.disconnected).toBe(false);
+  });
+
+  it('a keep-waiting poll started while no tab is open waits; a plain poll still answers disconnected at once', async () => {
+    const { file } = fixture();
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+
+    await fetch(`${server.address()}__kaya/state?client=c1`);
+    tabGone(server);
+    expect(server.disconnected).toBe(true);
+
+    // default unchanged: no option, no wait
+    const plain = await (await fetch(`${server.address()}__kaya/poll?format=json`)).json();
+    expect(plain.disconnected).toBe(true);
+    expect(plain.feedback).toEqual([]);
+
+    const polling = fetch(`${server.address()}__kaya/poll?format=json&keep_waiting=1`).then((r) => r.json());
+    expect(await pending(polling)).toBe('still waiting');
+    tabGone(server);                                           // further sweeps leave it attached too
+    expect(await pending(polling)).toBe('still waiting');
+
+    await fetch(`${server.address()}__kaya/state?client=c2`);
+    await sendNote(server, 'first note after reopening');
+    const d = await polling;
+    expect(d.feedback.map((f) => f.note)).toEqual(['first note after reopening']);
+  });
+
+  it('without --keep-waiting a closed tab still releases the poll (default unchanged)', async () => {
+    const { file } = fixture();
+    const server = new KayaReviewServer(file);
+    activeServers.push(server);
+    await server.start();
+
+    await fetch(`${server.address()}__kaya/state?client=c1`);
+    const polling = fetch(`${server.address()}__kaya/poll?format=json`).then((r) => r.json());
+    await pause(40);
+    tabGone(server);
+    const d = await polling;
+    expect(d.disconnected).toBe(true);
+    expect(await presenceOf(server)).not.toBe('listening');
+  });
+
   it('passes a DOM snapshot by path, never inlined into the poll output', async () => {
     const { file } = fixture();
     const server = new KayaReviewServer(file);
@@ -726,7 +805,8 @@ describe('guidance ships with the binary, not a skill file', () => {
     for (const rule of [
       'kaya poll <file>', 'PUT THE PRINTED URL IN YOUR REPLY', 'Answer IN Kaya, not in your own chat',
       'Address EVERY item', 'One poll per review', 'A newer poll retires an older one', '--receipt',
-      '"held" counts notes', 'review window disconnected',
+      '"held" counts notes', 'review window disconnected', '--keep-waiting', 'Never add it to a\n  foreground poll',
+      'Add --keep-waiting when you run it in the background',
       'delegating:', 'data-kaya-ask',
       // the claim the skill file once got wrong, stated correctly
       'moves onto a newer kaya by itself', 'stopping refuses while the user has unsent notes',
@@ -894,6 +974,68 @@ describe('one shared server on a fixed port', () => {
     expect(d.ended).toBe(false);
     expect(d.feedback).toEqual([]);
   });
+
+  it('end to end: `kaya poll --keep-waiting` outlives a closed tab and returns the note sent after it reopens', async () => {
+    const daemon = await daemonIn(freshState());
+    try {
+      const { file } = fixture();
+      const url = daemon.open(file).url;
+      const session = daemon.sessions.get(new URL(url).pathname.split('/')[2]);
+      await fetch(`${url}__kaya/state?client=c1`);                 // the review tab is open
+      let finished = false;
+      const run = kaya(['poll', file, '--keep-waiting']).then((r) => { finished = true; return r; });
+      const attached = Date.now() + 8000;
+      while (!session.waiters.size && Date.now() < attached) await new Promise((r) => setTimeout(r, 50));
+      expect(session.waiters.size).toBe(1);
+
+      session.lastClientAt = Date.now() - 60000;                    // the tab closes, past the grace period
+      session.clients.clear();
+      session.sweepClients();
+      await new Promise((r) => setTimeout(r, 400));
+      expect(finished).toBe(false);                                 // a plain `kaya poll` has exited by now
+      expect(session.waiters.size).toBe(1);
+
+      await fetch(`${url}__kaya/state?client=c2`);                 // the reviewer comes back and sends
+      await fetch(`${url}__kaya/feedback`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ items: [{ text: 'came back and sent this' }] }) });
+      const { code, stdout } = await run;
+      expect(code).toBe(0);
+      expect(stdout).toContain('status: feedback');
+      expect(stdout).toContain('came back and sent this');
+      expect(stdout).toContain('--keep-waiting --agent-reply');    // the next poll it is told to run keeps the option
+      expect(stdout).toContain('(run it in the background) BEFORE replying');   // and stays out of the foreground
+    } finally { await daemon.shutdown(); }
+  }, 20000);
+
+  it('end to end: open and reply offer --keep-waiting, and a disconnected plain poll leads with re-polling with it', async () => {
+    const daemon = await daemonIn(freshState());
+    try {
+      const { file } = fixture();
+      const opened = await kaya(['open', file, '--no-open']);
+      expect(opened.code).toBe(0);
+      expect(opened.stdout).toContain('to wait for their notes (add --keep-waiting when you run it in the background)');
+      const replied = await kaya(['reply', file, '--agent-reply', 'Plan is up']);
+      expect(replied.code).toBe(0);
+      expect(replied.stdout).toContain("to wait for the user's response (add --keep-waiting when you run it in the background)");
+
+      const url = daemon.url(file);
+      const session = daemon.sessions.get(new URL(url).pathname.split('/')[2]);
+      await fetch(`${url}__kaya/state?client=c1`);                 // the review tab is open
+      const run = kaya(['poll', file]);
+      const attached = Date.now() + 8000;
+      while (!session.waiters.size && Date.now() < attached) await new Promise((r) => setTimeout(r, 50));
+      expect(session.waiters.size).toBe(1);
+      session.lastClientAt = Date.now() - 60000;                    // the tab closes, past the grace period
+      session.clients.clear();
+      session.sweepClients();
+      const { code, stdout } = await run;
+      expect(code).toBe(0);
+      expect(stdout).toContain('status: review window disconnected');
+      const step = stdout.slice(stdout.indexOf('next_step')).toLowerCase();
+      expect(step).toContain('--keep-waiting` in the background now');
+      // a background poller reaches the re-poll before the stop-and-ask meant for a foreground one
+      expect(step.indexOf('--keep-waiting')).toBeLessThan(step.indexOf('ask the user'));
+    } finally { await daemon.shutdown(); }
+  }, 20000);
 
   it('stopping a review forgets it but keeps its conversation for the next open', async () => {
     const daemon = await daemonIn(freshState());

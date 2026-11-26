@@ -26,6 +26,7 @@ shows the live reviews for the current directory.
 1. **Print the review URL** that `kaya open <file>` returns, in full, in your reply
    every time you mention the review. The user cannot see your tool output.
 2. **Poll after every artifact create or edit**, and whenever the user mentions the
-   review or their feedback: `kaya poll <file> --agent-reply "<what changed>"`.
-   Feedback never arrives on its own. Give every delivered note an outcome with
+   review or their feedback: `kaya poll <file> --agent-reply "<what changed>"`,
+   adding `--keep-waiting` when you run it in the background. Feedback never arrives
+   on its own. Give every delivered note an outcome with
    `--receipt "n1=addressed: ...; n2=deferred: ..."`.

@@ -38,7 +38,7 @@ repeat until you end it.
 | `kaya` | Live reviews for this directory. |
 | `kaya <file>` | Open or resume a review. Prints the URL; opens a browser if none is showing it. |
 | `kaya <file> --reopen` | Reopen a review **you** ended. Required, see below. |
-| `kaya poll <file> [--agent-reply "..."] [--receipt "..."]` | Block until you send notes, end the review, or close it. |
+| `kaya poll <file> [--agent-reply "..."] [--receipt "..."] [--keep-waiting]` | Block until you send notes, end the review, or close it. With `--keep-waiting`, closing the tab does not end it; see below. |
 | `kaya reply <file> --agent-reply "..." [--receipt "..."]` | Hand a result back without waiting; confirms the server accepted it. |
 | `kaya list` | Every live review on this machine, with unread counts. |
 | `kaya end <file>` | End the review as the agent. A no-op if it is already ended. |
@@ -86,6 +86,21 @@ One server on a fixed port (41731, or `KAYA_PORT`) hosts every review at
 open tab simply reconnects. The server replaces itself with newer code the next
 time `kaya open` or `kaya poll` runs, and stops itself after 30 idle minutes; an
 open tab keeps it running.
+
+### A background listener survives a closed tab
+
+By default a poll returns "review window disconnected" once every review tab has been
+gone for 15 seconds (`KAYA_DISCONNECT_GRACE_MS`), and a new poll answers the same at once
+until a tab is back. That suits an agent waiting in the foreground, which would otherwise
+hang. An agent that polls in the background, where its harness wakes it the moment the
+command finishes, should pass `--keep-waiting` instead: the poll stays attached through a
+closed or dropped tab, also waits when no tab is open yet, and returns only on notes or an
+end. Notes you send after coming back to the page then reach the agent straight away
+instead of waiting for it to poll again.
+
+```bash
+kaya poll plan.html --keep-waiting --agent-reply "Plan is up"   # in a background job
+```
 
 ### Notes are never lost
 
