@@ -380,7 +380,8 @@ export class ReviewSession {
       return Promise.resolve(result);
     }
     // Already known gone: answer at once rather than holding the agent on a tab
-    // that is not coming back. The next_step tells it to ask rather than re-poll.
+    // that is not coming back. The CLI's next_step tells a foreground poller to
+    // ask the user, and a background one to re-poll with --keep-waiting.
     // A keep-waiting poll waits for the reviewer to come back instead.
     if (this.disconnected && !keepWaiting) return Promise.resolve({ feedback: [], ended: this.ended, disconnected: true });
     return new Promise((resolvePoll) => {
