@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync,
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-function registryDirectory() {
+export function registryDirectory() {
   const configured = process.env.KAYA_STATE_DIR;
   const directory = configured ? resolve(configured) : join(tmpdir(), 'kaya-editor');
   mkdirSync(directory, { recursive: true });
