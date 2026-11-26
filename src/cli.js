@@ -238,12 +238,14 @@ function openBrowser(url) {
   child.unref();
 }
 
+const IN_BACKGROUND = '(add --keep-waiting when you run it in the background)';
+
 function openedOutput(target, url, status) {
   return {
     session: { file: display(target), url, status },
     help: [
       `Put ${url} in your reply to the user, in full - they cannot see this output`,
-      `Run \`kaya poll ${display(target)} --agent-reply "<what to review first>"\` to wait for their notes`,
+      `Run \`kaya poll ${display(target)} --agent-reply "<what to review first>"\` to wait for their notes ${IN_BACKGROUND}`,
     ],
   };
 }
@@ -329,11 +331,11 @@ function feedbackOutput(target, d, { keepWaiting = false } = {}) {
       ? `This review has ended. Stop polling ${f}. Deliver remaining updates in the conversation, or run \`kaya open ${f}\` if the user needs another visual round.`
       : `The user ended this review. Stop polling ${f} and do not reopen it uninvited. Deliver any remaining updates in the conversation.`;
   } else if (d.disconnected) {
-    out.next_step = 'The review window was closed or disconnected. The session is still open and resumable. Ask the user whether to reopen it or end it, and do neither uninvited. Do not keep polling in a loop while it is disconnected. If you poll in the background and your harness wakes you when that command finishes, poll again with --keep-waiting instead: it waits for the user to come back.';
+    out.next_step = `The review window was closed or disconnected. The session is still open and resumable. If you ran this poll in the background and your harness wakes you when that command finishes, run \`kaya poll ${f} --keep-waiting\` in the background now: it waits for the user to come back and send. If you polled in the foreground, ask the user whether to reopen it or end it, and do neither uninvited; do not keep polling in a loop while it is disconnected.`;
   } else {
     const ids = [...(d.unaccounted || []), ...d.feedback.map((item) => item.id).filter(Boolean)];
     const example = ids.slice(0, 2).map((id, i) => `${id}=${i === 0 ? 'addressed' : 'deferred'}: <${i === 0 ? 'what you did' : 'why'}>`).join('; ');
-    out.next_step = `${n === 1 ? 'Address the item above' : `Address every one of the ${n} items above`}${d.unaccounted?.length ? `, plus ${d.unaccounted.join(', ')} still unaccounted for from earlier` : ''}, apply the changes to ${f}, then run \`kaya poll ${f}${keepWaiting ? ' --keep-waiting' : ''} --agent-reply "<what changed>" --receipt "${example}"\` BEFORE replying to the user anywhere else. The receipt must give every id (${ids.join(', ')}) an outcome: addressed, deferred or rejected. Do not answer outside Kaya while this review is open. Poll delivery consumes the response, so read it completely.`;
+    out.next_step = `${n === 1 ? 'Address the item above' : `Address every one of the ${n} items above`}${d.unaccounted?.length ? `, plus ${d.unaccounted.join(', ')} still unaccounted for from earlier` : ''}, apply the changes to ${f}, then run \`kaya poll ${f}${keepWaiting ? ' --keep-waiting' : ''} --agent-reply "<what changed>" --receipt "${example}"\` ${keepWaiting ? '(run it in the background)' : IN_BACKGROUND} BEFORE replying to the user anywhere else. The receipt must give every id (${ids.join(', ')}) an outcome: addressed, deferred or rejected. Do not answer outside Kaya while this review is open. Poll delivery consumes the response, so read it completely.`;
     if (d.held > 0) out.next_step += ` The user also has ${d.held} note${d.held === 1 ? '' : 's'} typed but not sent; those arrive only when they press Send.`;
   }
   return out;
@@ -406,7 +408,7 @@ async function reply(args) {
     out.unaccounted = r.unaccounted;
     out.next_step = `Notes ${r.unaccounted.join(', ')} were delivered but no reply has accounted for them. Give each an outcome with \`kaya reply ${f} --receipt "${r.unaccounted[0]}=addressed: <what you did>"\`.`;
   } else {
-    out.help = [`Run \`kaya poll ${f}\` to wait for the user's response`];
+    out.help = [`Run \`kaya poll ${f}\` to wait for the user's response ${IN_BACKGROUND}`];
   }
   return out;
 }
@@ -509,7 +511,7 @@ async function home() {
   if (here.length) out.reviews = sessionRows(here);
   else out.reviews = `0 live Kaya reviews in this directory${elsewhere ? ` (${elsewhere} elsewhere)` : ''}`;
   const help = [];
-  if (here.some((s) => !s.ended)) help.push('Run `kaya poll <file>` to collect notes on an open review, and put its URL in your reply');
+  if (here.some((s) => !s.ended)) help.push(`Run \`kaya poll <file>\` to collect notes on an open review ${IN_BACKGROUND}, and put its URL in your reply`);
   help.push('Run `kaya open <file>` to put an HTML or Markdown artifact up for review');
   if (elsewhere) help.push(`Run \`kaya list\` for all ${all.length} live reviews`);
   out.help = help;
@@ -551,6 +553,7 @@ the loop:
      review. They cannot see your tool output. A review's URL is permanent: it survives
      restarts and upgrades, so the same link keeps working.
   4. kaya poll <file> --agent-reply "<what you built, what to look at first>"
+     Add --keep-waiting when you run it in the background (see the rules below).
   5. Apply everything it returns, then poll again with a fresh --agent-reply saying what
      changed. That reply is how your answer reaches the browser.
   6. kaya end <file> when the review is finished.
@@ -570,7 +573,8 @@ rules that are easy to get wrong:
   so notes the user sends after coming back still reach you. Never add it to a
   foreground poll: it holds your turn until the user returns.
   Without it, "review window disconnected" means the tab was closed. The review is
-  still resumable: ask the user whether to reopen or end it, and do neither alone.
+  still resumable: a background poll re-polls with --keep-waiting; a foreground one
+  asks the user whether to reopen or end it, and does neither alone.
   An ended review ends the loop. Stop polling. Do not reopen uninvited.
   Reviews share one server on a fixed port. It moves onto a newer kaya by itself the
   next time \`kaya open\` or \`kaya poll\` runs, keeping every review, URL and unsent

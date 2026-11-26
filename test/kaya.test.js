@@ -806,6 +806,7 @@ describe('guidance ships with the binary, not a skill file', () => {
       'kaya poll <file>', 'PUT THE PRINTED URL IN YOUR REPLY', 'Answer IN Kaya, not in your own chat',
       'Address EVERY item', 'One poll per review', 'A newer poll retires an older one', '--receipt',
       '"held" counts notes', 'review window disconnected', '--keep-waiting', 'Never add it to a\n  foreground poll',
+      'Add --keep-waiting when you run it in the background',
       'delegating:', 'data-kaya-ask',
       // the claim the skill file once got wrong, stated correctly
       'moves onto a newer kaya by itself', 'stopping refuses while the user has unsent notes',
@@ -1001,6 +1002,38 @@ describe('one shared server on a fixed port', () => {
       expect(stdout).toContain('status: feedback');
       expect(stdout).toContain('came back and sent this');
       expect(stdout).toContain('--keep-waiting --agent-reply');    // the next poll it is told to run keeps the option
+      expect(stdout).toContain('(run it in the background) BEFORE replying');   // and stays out of the foreground
+    } finally { await daemon.shutdown(); }
+  }, 20000);
+
+  it('end to end: open and reply offer --keep-waiting, and a disconnected plain poll leads with re-polling with it', async () => {
+    const daemon = await daemonIn(freshState());
+    try {
+      const { file } = fixture();
+      const opened = await kaya(['open', file, '--no-open']);
+      expect(opened.code).toBe(0);
+      expect(opened.stdout).toContain('to wait for their notes (add --keep-waiting when you run it in the background)');
+      const replied = await kaya(['reply', file, '--agent-reply', 'Plan is up']);
+      expect(replied.code).toBe(0);
+      expect(replied.stdout).toContain("to wait for the user's response (add --keep-waiting when you run it in the background)");
+
+      const url = daemon.url(file);
+      const session = daemon.sessions.get(new URL(url).pathname.split('/')[2]);
+      await fetch(`${url}__kaya/state?client=c1`);                 // the review tab is open
+      const run = kaya(['poll', file]);
+      const attached = Date.now() + 8000;
+      while (!session.waiters.size && Date.now() < attached) await new Promise((r) => setTimeout(r, 50));
+      expect(session.waiters.size).toBe(1);
+      session.lastClientAt = Date.now() - 60000;                    // the tab closes, past the grace period
+      session.clients.clear();
+      session.sweepClients();
+      const { code, stdout } = await run;
+      expect(code).toBe(0);
+      expect(stdout).toContain('status: review window disconnected');
+      const step = stdout.slice(stdout.indexOf('next_step')).toLowerCase();
+      expect(step).toContain('--keep-waiting` in the background now');
+      // a background poller reaches the re-poll before the stop-and-ask meant for a foreground one
+      expect(step.indexOf('--keep-waiting')).toBeLessThan(step.indexOf('ask the user'));
     } finally { await daemon.shutdown(); }
   }, 20000);
 
