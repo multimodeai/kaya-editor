@@ -215,7 +215,8 @@ async function liveSessions() {
     try {
       const info = await getJson(`${origin}/__kaya/health`, 600);
       if (!servesFile(info, r.file) || rows.some((row) => row.file === r.file)) continue;
-      rows.push({ file: r.file, url: `${origin}/`, ended: Boolean(info.ended), staged: info.staged || 0, unread: info.unread || 0, lastActivity: info.lastActivity || 0, shared: false });
+      const unread = info.unread ?? (await getJson(`${origin}/__kaya/state`, 600).catch(() => ({}))).queued ?? 0;
+      rows.push({ file: r.file, url: `${origin}/`, ended: Boolean(info.ended), staged: info.staged || 0, unread, lastActivity: info.lastActivity || 0, shared: false });
     } catch (_error) { /* dead per-file server, not a live review */ }
   }
   return rows.sort((a, b) => b.lastActivity - a.lastActivity);
@@ -442,7 +443,7 @@ async function end(args) {
   // sent stay stranded in the browser, and sent notes no poll has collected are
   // never read. Refuse, the same way `kaya stop` does, unless explicitly forced.
   const held = health.staged || 0;
-  const uncollected = health.unread || 0;
+  const uncollected = health.unread ?? (await (await requestTo(target, '/__kaya/state', { timeoutMs: 1000 })).json()).queued ?? 0;
   if ((held || uncollected) && !flags['--force']) {
     const parts = [];
     if (held) parts.push(`${held} unsent note${held === 1 ? '' : 's'}`);

@@ -1665,4 +1665,52 @@ describe('kaya end never silently drops notes', () => {
       expect(listed.stdout).toMatch(/,3,2,/);                        // unsent 3, unread 2
     } finally { await daemon.shutdown(); }
   });
+
+  it('regression: a server from before 0.4.8, whose health has no unread count, still blocks the end', async () => {
+    // `kaya end` and `kaya list` reach whatever server is already running: a
+    // per-file server from an older kaya, or a shared server not yet replaced.
+    // Their health reply is the 0.4.7 one, without `unread`, so the count read 0
+    // and the end went through with the sent notes uncollected.
+    const state = mkdtempSync(join(tmpdir(), 'kaya-state-'));
+    states.push(state);
+    process.env.KAYA_STATE_DIR = state;
+    const { startKayaServer } = await import('../src/server.js');
+    const { writeRegistry } = await import('../src/registry.js');
+    const { createServer } = await import('node:http');
+    const { file } = fixture();
+    const real = await startKayaServer(file);
+    const older = createServer((req, res) => {
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', async () => {
+        const upstream = await fetch(new URL(req.url, real.address()), {
+          method: req.method, headers: { 'content-type': 'application/json' }, body: chunks.length ? Buffer.concat(chunks) : undefined,
+        });
+        let text = await upstream.text();
+        if (req.url.startsWith('/__kaya/health')) { const health = JSON.parse(text); delete health.unread; text = JSON.stringify(health); }
+        res.writeHead(upstream.status, { 'content-type': 'application/json' });
+        res.end(text);
+      });
+    });
+    await new Promise((r) => older.listen(0, '127.0.0.1', r));
+    writeRegistry(file, { port: older.address().port, pid: process.pid, host: '127.0.0.1' });
+    const env = { KAYA_STATE_DIR: state, KAYA_PORT: String(await freePort()) };
+    try {
+      expect('unread' in await (await fetch(`http://127.0.0.1:${older.address().port}/__kaya/health`)).json()).toBe(false);
+      await fetch(`${real.address()}__kaya/feedback`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ items: [{ text: 'please fix the header' }], client: 'c1' }),
+      });
+      const listed = await kaya(['list'], undefined, env);
+      expect(listed.stdout).toMatch(/,open,0,1,/);                   // unsent 0, unread 1
+      const ended = await kaya(['end', file], undefined, env);
+      expect(ended.code).toBe(1);
+      expect(ended.stdout).toContain('code: UNSENT_NOTES');
+      expect(ended.stdout).toContain('1 sent note no agent has collected');
+      expect((await (await fetch(`${real.address()}__kaya/health`)).json()).ended).toBe(false);
+    } finally {
+      await new Promise((r) => older.close(r));
+      await real.close();
+    }
+  });
 });
