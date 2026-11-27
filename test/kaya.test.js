@@ -1683,8 +1683,10 @@ describe('kaya end never silently drops notes', () => {
       });
       const listed = await kaya(['list'], undefined, env);
       expect(listed.code).toBe(0);
-      expect(listed.stdout).toContain('unsent');
-      expect(listed.stdout).toMatch(/,3,2,/);                        // unsent 3, unread 2
+      // Readers of `kaya list` take unread from right after the status and the
+      // last-active age from the last field, so the new column sits between them.
+      expect(listed.stdout).toContain('{name,url,status,unread,unsent,active}');
+      expect(listed.stdout).toMatch(/,open,2,3,[^,\n]+$/m);          // unread 2, unsent 3, then the age
     } finally { await daemon.shutdown(); }
   });
 
@@ -1707,7 +1709,7 @@ describe('kaya end never silently drops notes', () => {
         body: JSON.stringify({ items: [{ text: 'please fix the header' }], client: 'c1' }),
       });
       const listed = await kaya(['list'], undefined, env);
-      expect(listed.stdout).toMatch(/,open,0,1,/);                   // unsent 0, unread 1
+      expect(listed.stdout).toMatch(/,open,1,0,/);                   // unread 1, unsent 0
       const ended = await kaya(['end', file], undefined, env);
       expect(ended.code).toBe(1);
       expect(ended.stdout).toContain('code: UNSENT_NOTES');

@@ -241,7 +241,7 @@ function relTime(ms) {
 
 function sessionRows(sessions) {
   const now = Date.now();
-  return sessions.map((s) => ({ name: display(s.file), url: s.url, status: s.ended ? 'ended' : 'open', unsent: s.staged || 0, unread: s.unread || 0, active: s.lastActivity ? relTime(now - s.lastActivity) : 'idle' }));
+  return sessions.map((s) => ({ name: display(s.file), url: s.url, status: s.ended ? 'ended' : 'open', unread: s.unread || 0, unsent: s.staged || 0, active: s.lastActivity ? relTime(now - s.lastActivity) : 'idle' }));
 }
 
 // ---- commands -------------------------------------------------------------------
@@ -693,8 +693,8 @@ example:
   kaya reply .kaya/plan.html --agent-reply "Done - final version is up" --receipt "n3=addressed: cut the repeat"`,
   list: `usage: kaya list
   Every live review on this machine, newest first, with its URL.
-  unsent counts notes typed in the browser but not sent; unread counts sent notes
-  no poll has collected yet.`,
+  unread counts sent notes no poll has collected yet; unsent counts notes typed in
+  the browser but not sent.`,
   end: `usage: kaya end <file> [--force]
   End a review as the agent. Not running, or already ended with nothing left to
   collect, is a no-op.
