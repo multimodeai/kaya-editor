@@ -1666,38 +1666,21 @@ describe('kaya end never silently drops notes', () => {
     } finally { await daemon.shutdown(); }
   });
 
-  it('regression: a server from before 0.4.8, whose health has no unread count, still blocks the end', async () => {
-    // `kaya end` and `kaya list` reach whatever server is already running: a
-    // per-file server from an older kaya, or a shared server not yet replaced.
-    // Their health reply is the 0.4.7 one, without `unread`, so the count read 0
-    // and the end went through with the sent notes uncollected.
+  it('regression: a review on a per-file server, whose health carries no unread count, still blocks the end', async () => {
+    // `kaya end` and `kaya list` reach whatever server is already running, such
+    // as a per-file server from an older kaya. Its health reply has never carried
+    // an unread count, so reading the count there let the end go through with
+    // the sent notes uncollected. Every server reports them as `queued` on its
+    // state endpoint.
     const state = mkdtempSync(join(tmpdir(), 'kaya-state-'));
     states.push(state);
     process.env.KAYA_STATE_DIR = state;
     const { startKayaServer } = await import('../src/server.js');
-    const { writeRegistry } = await import('../src/registry.js');
-    const { createServer } = await import('node:http');
     const { file } = fixture();
-    const real = await startKayaServer(file);
-    const older = createServer((req, res) => {
-      const chunks = [];
-      req.on('data', (c) => chunks.push(c));
-      req.on('end', async () => {
-        const upstream = await fetch(new URL(req.url, real.address()), {
-          method: req.method, headers: { 'content-type': 'application/json' }, body: chunks.length ? Buffer.concat(chunks) : undefined,
-        });
-        let text = await upstream.text();
-        if (req.url.startsWith('/__kaya/health')) { const health = JSON.parse(text); delete health.unread; text = JSON.stringify(health); }
-        res.writeHead(upstream.status, { 'content-type': 'application/json' });
-        res.end(text);
-      });
-    });
-    await new Promise((r) => older.listen(0, '127.0.0.1', r));
-    writeRegistry(file, { port: older.address().port, pid: process.pid, host: '127.0.0.1' });
+    const server = await startKayaServer(file);
     const env = { KAYA_STATE_DIR: state, KAYA_PORT: String(await freePort()) };
     try {
-      expect('unread' in await (await fetch(`http://127.0.0.1:${older.address().port}/__kaya/health`)).json()).toBe(false);
-      await fetch(`${real.address()}__kaya/feedback`, {
+      await fetch(`${server.address()}__kaya/feedback`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ items: [{ text: 'please fix the header' }], client: 'c1' }),
       });
@@ -1707,10 +1690,30 @@ describe('kaya end never silently drops notes', () => {
       expect(ended.code).toBe(1);
       expect(ended.stdout).toContain('code: UNSENT_NOTES');
       expect(ended.stdout).toContain('1 sent note no agent has collected');
-      expect((await (await fetch(`${real.address()}__kaya/health`)).json()).ended).toBe(false);
-    } finally {
-      await new Promise((r) => older.close(r));
-      await real.close();
-    }
+      expect((await (await fetch(`${server.address()}__kaya/health`)).json()).ended).toBe(false);
+    } finally { await server.close(); }
+  });
+
+  it('regression: kaya stop refuses while sent notes wait for a poll, and --force stops anyway', async () => {
+    // Stopping deletes the saved queue, so on Kaya 0.4.7 `kaya stop` silently
+    // dropped sent notes no poll had collected.
+    const { daemon, file, base, env } = await liveReview();
+    try {
+      await fetch(`${base}__kaya/feedback`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ items: [{ text: 'please fix the header' }], client: 'c1' }),
+      });
+      const refused = await kaya(['stop', file], undefined, env);
+      expect(refused.code).toBe(1);
+      expect(refused.stdout).toContain('code: UNSENT_NOTES');
+      expect(refused.stdout).toContain('1 sent note no agent has collected');
+      expect(refused.stdout).toContain('kaya poll');
+      expect(refused.stdout).toContain('--force');
+      expect((await fetch(`${base}__kaya/health`)).status).toBe(200);          // still running
+      const forced = await kaya(['stop', file, '--force'], undefined, env);
+      expect(forced.code).toBe(0);
+      await new Promise((r) => setTimeout(r, 30));
+      expect(daemon.describeAll().some((r) => r.file === file)).toBe(false);   // stopped
+    } finally { await daemon.shutdown(); }
   });
 });

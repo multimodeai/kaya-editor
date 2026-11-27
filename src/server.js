@@ -408,7 +408,7 @@ export class ReviewSession {
   async handle(request, response, pathname) {
     const url = new URL(request.url || '/', 'http://localhost');
     if (pathname !== undefined) url.pathname = pathname;
-    if (url.pathname === '/__kaya/health') return json(response, 200, { ok: true, file: this.file, ended: this.ended, endedBy: this.endedBy, staged: this.stagedCount(), unread: this.queue.length, historyLen: this.history.length, lastActivity: this.lastActivity });
+    if (url.pathname === '/__kaya/health') return json(response, 200, { ok: true, file: this.file, ended: this.ended, endedBy: this.endedBy, staged: this.stagedCount(), historyLen: this.history.length, lastActivity: this.lastActivity });
     if (url.pathname === '/__kaya/sessions' && request.method === 'GET') {
       if (this.listSessions) return json(response, 200, { sessions: this.listSessions(this) });
       const regs = listRegistries();
