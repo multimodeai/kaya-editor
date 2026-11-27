@@ -1583,3 +1583,161 @@ describe('discovery checks who answers, not just the recorded address', () => {
     } finally { await daemon.shutdown(); }
   });
 });
+
+describe('kaya end never silently drops notes', () => {
+  const states = [];
+  afterEach(() => { delete process.env.KAYA_STATE_DIR; states.splice(0).forEach((d) => rmSync(d, { recursive: true, force: true })); });
+
+  // A real shared server in this process, and the real CLI pointed at it.
+  async function liveReview() {
+    const state = mkdtempSync(join(tmpdir(), 'kaya-state-'));
+    states.push(state);
+    process.env.KAYA_STATE_DIR = state;
+    const { KayaDaemon } = await import('../src/server.js');
+    const daemon = new KayaDaemon({ port: 0, idleMs: 60_000 });
+    await daemon.start();
+    const { file } = fixture();
+    daemon.open(file);
+    const base = daemon.url(file);
+    const env = { KAYA_STATE_DIR: state, KAYA_PORT: String(daemon.port) };
+    const health = async () => (await fetch(`${base}__kaya/health`)).json();
+    return { daemon, file, base, env, health };
+  }
+
+  it('regression: refuses while the browser holds notes typed but not sent', async () => {
+    // Reproduced on Kaya 0.4.7: `kaya stop` refused here, `kaya end` ended the review.
+    const { daemon, file, base, env, health } = await liveReview();
+    try {
+      await fetch(`${base}__kaya/state?client=c1&staged=2`);
+      const ended = await kaya(['end', file], undefined, env);
+      expect(ended.code).toBe(1);
+      expect(ended.stdout).toContain('code: UNSENT_NOTES');
+      expect(ended.stdout).toContain('2 unsent notes');
+      expect(ended.stdout).toContain('--force');
+      expect((await health()).ended).toBe(false);                 // still open, notes still there
+    } finally { await daemon.shutdown(); }
+  });
+
+  it('regression: refuses while sent notes wait for a poll that never collected them', async () => {
+    const { daemon, file, base, env, health } = await liveReview();
+    try {
+      await fetch(`${base}__kaya/feedback`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ items: [{ text: 'please fix the header' }], client: 'c1' }),
+      });
+      const listed = await kaya(['list'], undefined, env);
+      expect(listed.stdout).toMatch(/unread/);
+      const ended = await kaya(['end', file], undefined, env);
+      expect(ended.code).toBe(1);
+      expect(ended.stdout).toContain('code: UNSENT_NOTES');
+      expect(ended.stdout).toContain('1 sent note no agent has collected');
+      expect(ended.stdout).toContain('kaya poll');
+      expect((await health()).ended).toBe(false);
+    } finally { await daemon.shutdown(); }
+  });
+
+  it('regression: a review the user ended with Send & End, with no poll attached, still reports its sent notes', async () => {
+    // Reproduced on this change before the fix: `kaya end` answered "already
+    // ended (no-op)" and exited 0, so nothing ever collected the notes.
+    const { daemon, file, base, env } = await liveReview();
+    try {
+      await fetch(`${base}__kaya/feedback`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ items: [{ text: 'please fix the header' }], endSession: true, client: 'c1' }),
+      });
+      const ended = await kaya(['end', file], undefined, env);
+      expect(ended.code).toBe(1);
+      expect(ended.stdout).toContain('code: UNSENT_NOTES');
+      expect(ended.stdout).toContain('1 sent note no agent has collected');
+      expect(ended.stdout).toContain(`kaya poll ${file}`);
+      const collected = await (await fetch(`${base}__kaya/poll?format=json`)).json();
+      expect(collected.feedback.map((f) => f.note)).toEqual(['please fix the header']);   // still there to collect
+      const again = await kaya(['end', file], undefined, env);
+      expect(again.code).toBe(0);
+      expect(again.stdout).toContain('already ended (no-op)');
+    } finally { await daemon.shutdown(); }
+  });
+
+  it('--force ends anyway, and a review with nothing pending ends as before', async () => {
+    const { daemon, file, base, env, health } = await liveReview();
+    try {
+      const clean = await kaya(['end', file], undefined, env);
+      expect(clean.code).toBe(0);
+      expect(clean.stdout).toContain('status: ended');
+      await fetch(`${base}__kaya/reopen`, { method: 'POST' });
+      await fetch(`${base}__kaya/state?client=c1&staged=1`);
+      const forced = await kaya(['end', file, '--force'], undefined, env);
+      expect(forced.code).toBe(0);
+      expect(forced.stdout).toContain('status: ended');
+      expect((await health()).ended).toBe(true);
+    } finally { await daemon.shutdown(); }
+  });
+
+  it('kaya list shows unsent and uncollected counts', async () => {
+    const { daemon, base, env } = await liveReview();
+    try {
+      await fetch(`${base}__kaya/state?client=c1&staged=3`);
+      await fetch(`${base}__kaya/feedback`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ items: [{ text: 'a' }, { text: 'b' }], client: 'c2' }),
+      });
+      const listed = await kaya(['list'], undefined, env);
+      expect(listed.code).toBe(0);
+      // Readers of `kaya list` take unread from right after the status and the
+      // last-active age from the last field, so the new column sits between them.
+      expect(listed.stdout).toContain('{name,url,status,unread,unsent,active}');
+      expect(listed.stdout).toMatch(/,open,2,3,[^,\n]+$/m);          // unread 2, unsent 3, then the age
+    } finally { await daemon.shutdown(); }
+  });
+
+  it('regression: a review on a per-file server, whose health carries no unread count, still blocks the end', async () => {
+    // `kaya end` and `kaya list` reach whatever server is already running, such
+    // as a per-file server from an older kaya. Its health reply has never carried
+    // an unread count, so reading the count there let the end go through with
+    // the sent notes uncollected. Every server reports them as `queued` on its
+    // state endpoint.
+    const state = mkdtempSync(join(tmpdir(), 'kaya-state-'));
+    states.push(state);
+    process.env.KAYA_STATE_DIR = state;
+    const { startKayaServer } = await import('../src/server.js');
+    const { file } = fixture();
+    const server = await startKayaServer(file);
+    const env = { KAYA_STATE_DIR: state, KAYA_PORT: String(await freePort()) };
+    try {
+      await fetch(`${server.address()}__kaya/feedback`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ items: [{ text: 'please fix the header' }], client: 'c1' }),
+      });
+      const listed = await kaya(['list'], undefined, env);
+      expect(listed.stdout).toMatch(/,open,1,0,/);                   // unread 1, unsent 0
+      const ended = await kaya(['end', file], undefined, env);
+      expect(ended.code).toBe(1);
+      expect(ended.stdout).toContain('code: UNSENT_NOTES');
+      expect(ended.stdout).toContain('1 sent note no agent has collected');
+      expect((await (await fetch(`${server.address()}__kaya/health`)).json()).ended).toBe(false);
+    } finally { await server.close(); }
+  });
+
+  it('regression: kaya stop refuses while sent notes wait for a poll, and --force stops anyway', async () => {
+    // Stopping deletes the saved queue, so on Kaya 0.4.7 `kaya stop` silently
+    // dropped sent notes no poll had collected.
+    const { daemon, file, base, env } = await liveReview();
+    try {
+      await fetch(`${base}__kaya/feedback`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ items: [{ text: 'please fix the header' }], client: 'c1' }),
+      });
+      const refused = await kaya(['stop', file], undefined, env);
+      expect(refused.code).toBe(1);
+      expect(refused.stdout).toContain('code: UNSENT_NOTES');
+      expect(refused.stdout).toContain('1 sent note no agent has collected');
+      expect(refused.stdout).toContain('kaya poll');
+      expect(refused.stdout).toContain('--force');
+      expect((await fetch(`${base}__kaya/health`)).status).toBe(200);          // still running
+      const forced = await kaya(['stop', file, '--force'], undefined, env);
+      expect(forced.code).toBe(0);
+      await new Promise((r) => setTimeout(r, 30));
+      expect(daemon.describeAll().some((r) => r.file === file)).toBe(false);   // stopped
+    } finally { await daemon.shutdown(); }
+  });
+});
