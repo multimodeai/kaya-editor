@@ -1583,3 +1583,86 @@ describe('discovery checks who answers, not just the recorded address', () => {
     } finally { await daemon.shutdown(); }
   });
 });
+
+describe('kaya end never silently drops notes', () => {
+  const states = [];
+  afterEach(() => { delete process.env.KAYA_STATE_DIR; states.splice(0).forEach((d) => rmSync(d, { recursive: true, force: true })); });
+
+  // A real shared server in this process, and the real CLI pointed at it.
+  async function liveReview() {
+    const state = mkdtempSync(join(tmpdir(), 'kaya-state-'));
+    states.push(state);
+    process.env.KAYA_STATE_DIR = state;
+    const { KayaDaemon } = await import('../src/server.js');
+    const daemon = new KayaDaemon({ port: 0, idleMs: 60_000 });
+    await daemon.start();
+    const { file } = fixture();
+    daemon.open(file);
+    const base = daemon.url(file);
+    const env = { KAYA_STATE_DIR: state, KAYA_PORT: String(daemon.port) };
+    const health = async () => (await fetch(`${base}__kaya/health`)).json();
+    return { daemon, file, base, env, health };
+  }
+
+  it('regression: refuses while the browser holds notes typed but not sent', async () => {
+    // Reproduced on Kaya 0.4.7: `kaya stop` refused here, `kaya end` ended the review.
+    const { daemon, file, base, env, health } = await liveReview();
+    try {
+      await fetch(`${base}__kaya/state?client=c1&staged=2`);
+      const ended = await kaya(['end', file], undefined, env);
+      expect(ended.code).toBe(1);
+      expect(ended.stdout).toContain('code: UNSENT_NOTES');
+      expect(ended.stdout).toContain('2 unsent notes');
+      expect(ended.stdout).toContain('--force');
+      expect((await health()).ended).toBe(false);                 // still open, notes still there
+    } finally { await daemon.shutdown(); }
+  });
+
+  it('regression: refuses while sent notes wait for a poll that never collected them', async () => {
+    const { daemon, file, base, env, health } = await liveReview();
+    try {
+      await fetch(`${base}__kaya/feedback`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ items: [{ text: 'please fix the header' }], client: 'c1' }),
+      });
+      const listed = await kaya(['list'], undefined, env);
+      expect(listed.stdout).toMatch(/unread/);
+      const ended = await kaya(['end', file], undefined, env);
+      expect(ended.code).toBe(1);
+      expect(ended.stdout).toContain('code: UNSENT_NOTES');
+      expect(ended.stdout).toContain('1 sent note no agent has collected');
+      expect(ended.stdout).toContain('kaya poll');
+      expect((await health()).ended).toBe(false);
+    } finally { await daemon.shutdown(); }
+  });
+
+  it('--force ends anyway, and a review with nothing pending ends as before', async () => {
+    const { daemon, file, base, env, health } = await liveReview();
+    try {
+      const clean = await kaya(['end', file], undefined, env);
+      expect(clean.code).toBe(0);
+      expect(clean.stdout).toContain('status: ended');
+      await fetch(`${base}__kaya/reopen`, { method: 'POST' });
+      await fetch(`${base}__kaya/state?client=c1&staged=1`);
+      const forced = await kaya(['end', file, '--force'], undefined, env);
+      expect(forced.code).toBe(0);
+      expect(forced.stdout).toContain('status: ended');
+      expect((await health()).ended).toBe(true);
+    } finally { await daemon.shutdown(); }
+  });
+
+  it('kaya list shows unsent and uncollected counts', async () => {
+    const { daemon, base, env } = await liveReview();
+    try {
+      await fetch(`${base}__kaya/state?client=c1&staged=3`);
+      await fetch(`${base}__kaya/feedback`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ items: [{ text: 'a' }, { text: 'b' }], client: 'c2' }),
+      });
+      const listed = await kaya(['list'], undefined, env);
+      expect(listed.code).toBe(0);
+      expect(listed.stdout).toContain('unsent');
+      expect(listed.stdout).toMatch(/,3,2,/);                        // unsent 3, unread 2
+    } finally { await daemon.shutdown(); }
+  });
+});

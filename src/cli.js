@@ -59,7 +59,7 @@ const SPECS = {
   poll: { usage: 'kaya poll <file> [--agent-reply "<message>"] [--receipt "n1=addressed: ..."] [--keep-waiting]', flags: { '--agent-reply': 'string', '--receipt': 'string', '--keep-waiting': 'boolean' }, min: 1, argName: 'an artifact file' },
   reply: { usage: 'kaya reply <file> --agent-reply "<message>" [--receipt "n1=addressed: ..."]', flags: { '--agent-reply': 'string', '--receipt': 'string' }, min: 1, argName: 'an artifact file' },
   list: { usage: 'kaya list', flags: {} },
-  end: { usage: 'kaya end <file>', flags: {}, min: 1, argName: 'an artifact file' },
+  end: { usage: 'kaya end <file> [--force]', flags: { '--force': 'boolean' }, min: 1, argName: 'an artifact file' },
   export: { usage: 'kaya export <file> [--out <path>]', flags: { '--out': 'string' }, min: 1, argName: 'an artifact file' },
   stop: { usage: 'kaya stop <file> | kaya stop --all [--force]', flags: { '--all': 'boolean', '--force': 'boolean' }, min: 0, max: 1 },
   setup: { usage: 'kaya setup hooks | kaya setup status | kaya setup remove', flags: {}, min: 1, argName: 'hooks, status or remove' },
@@ -215,7 +215,7 @@ async function liveSessions() {
     try {
       const info = await getJson(`${origin}/__kaya/health`, 600);
       if (!servesFile(info, r.file) || rows.some((row) => row.file === r.file)) continue;
-      rows.push({ file: r.file, url: `${origin}/`, ended: Boolean(info.ended), staged: info.staged || 0, unread: 0, lastActivity: info.lastActivity || 0, shared: false });
+      rows.push({ file: r.file, url: `${origin}/`, ended: Boolean(info.ended), staged: info.staged || 0, unread: info.unread || 0, lastActivity: info.lastActivity || 0, shared: false });
     } catch (_error) { /* dead per-file server, not a live review */ }
   }
   return rows.sort((a, b) => b.lastActivity - a.lastActivity);
@@ -240,7 +240,7 @@ function relTime(ms) {
 
 function sessionRows(sessions) {
   const now = Date.now();
-  return sessions.map((s) => ({ name: display(s.file), url: s.url, status: s.ended ? 'ended' : 'open', unread: s.unread || 0, active: s.lastActivity ? relTime(now - s.lastActivity) : 'idle' }));
+  return sessions.map((s) => ({ name: display(s.file), url: s.url, status: s.ended ? 'ended' : 'open', unsent: s.staged || 0, unread: s.unread || 0, active: s.lastActivity ? relTime(now - s.lastActivity) : 'idle' }));
 }
 
 // ---- commands -------------------------------------------------------------------
@@ -429,7 +429,7 @@ async function reply(args) {
 }
 
 async function end(args) {
-  const { positionals } = parse('end', args, SPECS.end);
+  const { flags, positionals } = parse('end', args, SPECS.end);
   const target = resolve(positionals[0]);
   // Idempotent: a review that is already ended, or not running at all, is
   // already in the state asked for, so that is a no-op rather than an error.
@@ -438,6 +438,21 @@ async function end(args) {
   try { health = await (await requestTo(target, '/__kaya/health', { timeoutMs: 1000 })).json(); }
   catch (_error) { return { session: { file: display(target), status: 'no live review (no-op)' } }; }
   if (health.ended) return { session: { file: display(target), status: 'already ended (no-op)' } };
+  // Ending a review with notes still in flight drops them: notes typed but not
+  // sent stay stranded in the browser, and sent notes no poll has collected are
+  // never read. Refuse, the same way `kaya stop` does, unless explicitly forced.
+  const held = health.staged || 0;
+  const uncollected = health.unread || 0;
+  if ((held || uncollected) && !flags['--force']) {
+    const parts = [];
+    if (held) parts.push(`${held} unsent note${held === 1 ? '' : 's'}`);
+    if (uncollected) parts.push(`${uncollected} sent note${uncollected === 1 ? '' : 's'} no agent has collected`);
+    const help = [];
+    if (uncollected) help.push(`Run \`kaya poll ${display(target)}\` to collect the sent notes first`);
+    if (held) help.push('Ask the user to press Send in that review first');
+    help.push('Or rerun with --force to end anyway and lose those notes');
+    throw new AxiError(`${display(target)} has ${parts.join(' and ')}`, 'UNSENT_NOTES', help);
+  }
   await requestTo(target, '/__kaya/end?by=agent', { method: 'POST' });
   return { session: { file: display(target), status: 'ended' } };
 }
@@ -554,7 +569,7 @@ commands:
   poll <file> [--agent-reply MSG]     Block until the user sends notes, ends the review, or closes it
   reply <file> --agent-reply MSG      Hand a result back without waiting; prints an acceptance receipt
   list                                Every live review on this machine
-  end <file>                          End a review as the agent
+  end <file> [--force]                End a review as the agent; refuses while notes are unsent or uncollected
   export <file> [--out PATH]          Portable single file with local assets inlined
   stop <file> | stop --all            Stop a review; refuses while it holds unsent notes
   setup hooks|status|remove           Show live reviews at agent session start
@@ -674,9 +689,14 @@ examples:
 example:
   kaya reply .kaya/plan.html --agent-reply "Done - final version is up" --receipt "n3=addressed: cut the repeat"`,
   list: `usage: kaya list
-  Every live review on this machine, newest first, with its URL.`,
-  end: `usage: kaya end <file>
+  Every live review on this machine, newest first, with its URL.
+  unsent counts notes typed in the browser but not sent; unread counts sent notes
+  no poll has collected yet.`,
+  end: `usage: kaya end <file> [--force]
   End a review as the agent. Already ended or not running is a no-op.
+  Refuses while the review holds notes the user typed but has not sent, or sent
+  notes no poll has collected yet, since ending would drop them.
+  --force   end even though those notes will be lost
 example:
   kaya end .kaya/plan.html`,
   export: `usage: kaya export <file> [--out <path>]
