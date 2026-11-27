@@ -451,15 +451,16 @@ async function end(args) {
   const { flags, positionals } = parse('end', args, SPECS.end);
   const target = resolve(positionals[0]);
   // Idempotent: a review that is already ended, or not running at all, is
-  // already in the state asked for, so that is a no-op rather than an error.
+  // already in the state asked for, so that is a no-op rather than an error,
+  // unless sent notes still wait there for a poll.
   if (!(await sessionOrigin(target))) return { session: { file: display(target), status: 'no live review (no-op)' } };
   let health = null;
   try { health = await (await requestTo(target, '/__kaya/health', { timeoutMs: 1000 })).json(); }
   catch (_error) { return { session: { file: display(target), status: 'no live review (no-op)' } }; }
-  if (health.ended) return { session: { file: display(target), status: 'already ended (no-op)' } };
   const { queued } = await (await requestTo(target, '/__kaya/state', { timeoutMs: 1000 })).json();
-  const refusal = !flags['--force'] && notesInFlight([{ file: target, staged: health.staged || 0, unread: queued || 0 }], 'end');
+  const refusal = !flags['--force'] && notesInFlight([{ file: target, staged: health.ended ? 0 : health.staged || 0, unread: queued || 0 }], 'end');
   if (refusal) throw refusal;
+  if (health.ended) return { session: { file: display(target), status: 'already ended (no-op)' } };
   await requestTo(target, '/__kaya/end?by=agent', { method: 'POST' });
   return { session: { file: display(target), status: 'ended' } };
 }
@@ -695,9 +696,11 @@ example:
   unsent counts notes typed in the browser but not sent; unread counts sent notes
   no poll has collected yet.`,
   end: `usage: kaya end <file> [--force]
-  End a review as the agent. Already ended or not running is a no-op.
+  End a review as the agent. Not running, or already ended with nothing left to
+  collect, is a no-op.
   Refuses while the review holds notes the user typed but has not sent, or sent
-  notes no poll has collected yet, since ending would drop them.
+  notes no poll has collected yet, since ending would drop them. An already ended
+  review with sent notes still waiting refuses too: run kaya poll to collect them.
   --force   end even though those notes will be lost
 example:
   kaya end .kaya/plan.html`,

@@ -1636,6 +1636,28 @@ describe('kaya end never silently drops notes', () => {
     } finally { await daemon.shutdown(); }
   });
 
+  it('regression: a review the user ended with Send & End, with no poll attached, still reports its sent notes', async () => {
+    // Reproduced on this change before the fix: `kaya end` answered "already
+    // ended (no-op)" and exited 0, so nothing ever collected the notes.
+    const { daemon, file, base, env } = await liveReview();
+    try {
+      await fetch(`${base}__kaya/feedback`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ items: [{ text: 'please fix the header' }], endSession: true, client: 'c1' }),
+      });
+      const ended = await kaya(['end', file], undefined, env);
+      expect(ended.code).toBe(1);
+      expect(ended.stdout).toContain('code: UNSENT_NOTES');
+      expect(ended.stdout).toContain('1 sent note no agent has collected');
+      expect(ended.stdout).toContain(`kaya poll ${file}`);
+      const collected = await (await fetch(`${base}__kaya/poll?format=json`)).json();
+      expect(collected.feedback.map((f) => f.note)).toEqual(['please fix the header']);   // still there to collect
+      const again = await kaya(['end', file], undefined, env);
+      expect(again.code).toBe(0);
+      expect(again.stdout).toContain('already ended (no-op)');
+    } finally { await daemon.shutdown(); }
+  });
+
   it('--force ends anyway, and a review with nothing pending ends as before', async () => {
     const { daemon, file, base, env, health } = await liveReview();
     try {

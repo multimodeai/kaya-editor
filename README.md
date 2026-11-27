@@ -41,7 +41,7 @@ repeat until you end it.
 | `kaya poll <file> [--agent-reply "..."] [--receipt "..."] [--keep-waiting]` | Block until you send notes, end the review, or close it. With `--keep-waiting`, closing the tab does not end it; see below. |
 | `kaya reply <file> --agent-reply "..." [--receipt "..."]` | Hand a result back without waiting; confirms the server accepted it. |
 | `kaya list` | Every live review on this machine, with counts of unsent notes (typed in the browser but not sent) and unread notes (sent but not yet collected by a poll). |
-| `kaya end <file> [--force]` | End the review as the agent. A no-op if it is already ended. Refuses while the review holds notes the user typed but did not send, or sent notes no poll has collected; `--force` ends anyway and loses them. |
+| `kaya end <file> [--force]` | End the review as the agent. A no-op if it is already ended, unless sent notes are still waiting for a poll. Refuses while the review holds notes the user typed but did not send, or sent notes no poll has collected; `--force` ends anyway and loses them. |
 | `kaya export <file> [--out <path>]` | Write a standalone HTML copy with local assets inlined. |
 | `kaya stop <file>` / `kaya stop --all` | Stop a review. Refuses while you have unsent notes, or sent notes no poll has collected, unless `--force`. |
 | `kaya setup hooks` | Show live reviews at the start of every Claude Code, Codex or OpenCode session. |
